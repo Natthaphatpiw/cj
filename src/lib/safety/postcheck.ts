@@ -8,27 +8,33 @@ const forbiddenPatterns = [
   /ทำตามนี้แล้วจะหายแน่นอน/i
 ];
 
+const awkwardOpeners = [
+  /^โอ้\s*/u,
+  /^ได้ยินแล้ว[\s,ๆ]*/u,
+  /^เข้าใจเลย[\s,ๆ]*/u
+];
+
 function normalizeConversationalStyle(text: string) {
   let normalized = text;
   normalized = normalized.replace(/\*\*/g, "");
+  normalized = normalized.replace(/__/g, "");
   normalized = normalized.replace(/`/g, "");
   normalized = normalized.replace(/^#{1,6}\s*/gm, "");
   normalized = normalized.replace(/^\s*[-•]\s+/gm, "");
+  normalized = normalized.replace(/["“”]/g, "");
+  normalized = normalized.replace(/[‘’]/g, "");
   normalized = normalized.replace(/[ \t]+\n/g, "\n");
-  normalized = normalized.replace(/\n{3,}/g, "\n\n");
+  normalized = normalized.replace(/\n{4,}/g, "\n\n\n");
+  normalized = normalized.replace(/\s{2,}/g, " ").trim();
 
-  const lines = normalized
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean);
-
-  if (lines.length >= 3) {
-    normalized = lines.join(" ");
-  } else {
-    normalized = lines.join("\n");
+  for (const pattern of awkwardOpeners) {
+    normalized = normalized.replace(pattern, "");
   }
 
-  normalized = normalized.replace(/\s{2,}/g, " ").trim();
+  if (normalized.length === 0) {
+    normalized = "ขอบคุณที่เล่าให้ฟังนะ ผมอยู่ตรงนี้กับคุณ";
+  }
+
   return normalized;
 }
 
