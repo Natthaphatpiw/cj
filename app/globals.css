@@ -1,0 +1,27 @@
+:root {
+  color-scheme: light;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "IBM Plex Sans Thai", "Noto Sans Thai", sans-serif;
+  background: radial-gradient(circle at top, #ecf7ff, #f8fafc 45%, #ffffff);
+  color: #111827;
+}
+
+.container {
+  max-width: 720px;
+  margin: 80px auto;
+  padding: 24px;
+  background: #ffffff;
+  border-radius: 16px;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.08);
+}
+
+h1 {
+  margin-top: 0;
+}

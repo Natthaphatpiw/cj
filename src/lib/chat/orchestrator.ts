@@ -1,0 +1,387 @@
+import { env } from "@/lib/config";
+import {
+  createFollowup,
+  createHandoff,
+  getActiveSession,
+  getFollowupById,
+  getLineIdentityByUserId,
+  listRecentMessages,
+  listRecentSessionSummaries,
+  listUserMemories,
+  markFollowupAsSent,
+  openSession,
+  recordRiskEvent,
+  resolveUserByLineId,
+  saveMessage,
+  saveSessionSummary,
+  saveUserMemory,
+  updateSessionState,
+  writeAudit
+} from "@/lib/data/repositories";
+import { publishQStashJob } from "@/lib/data/qstash";
+import { upsertSearchDocument } from "@/lib/data/search";
+import { vectorUpsertTextRecord } from "@/lib/data/vector";
+import {
+  buildResponsePlanWithClaude,
+  resolveTopicWithClaude,
+  summarizeSessionWithClaude
+} from "@/lib/llm/anthropic";
+import { evaluateMemoryWrite } from "@/lib/memory/gate";
+import { buildMainMenuQuickReply, buildTopicConfirmationMessage } from "@/lib/line/messages";
+import { pushMessage } from "@/lib/line/client";
+import type { LineMessage, LineWebhookEvent } from "@/lib/line/types";
+import { logger } from "@/lib/logger";
+import { buildCrisisMessage, runSafetyPrecheck } from "@/lib/safety/precheck";
+import { runSafetyPostcheck } from "@/lib/safety/postcheck";
+import { resolveTopicBoundary } from "@/lib/topic/engine";
+
+type OrchestratorResult = {
+  replyMessages: LineMessage[];
+  shouldReply: boolean;
+  handled: boolean;
+};
+
+function getTextFromEvent(event: LineWebhookEvent) {
+  if (event.type === "message" && event.message?.type === "text") {
+    return event.message.text?.trim() ?? "";
+  }
+  if (event.type === "postback" && event.postback?.data) {
+    return event.postback.data;
+  }
+  return "";
+}
+
+function parseActionHint(event: LineWebhookEvent): "new_topic" | "continue_topic" | undefined {
+  if (event.type !== "postback" || !event.postback?.data) {
+    return undefined;
+  }
+  if (event.postback.data.includes("action=new_topic")) {
+    return "new_topic";
+  }
+  if (event.postback.data.includes("action=continue_topic")) {
+    return "continue_topic";
+  }
+  return undefined;
+}
+
+function crisisLabelFromRisk(risk: "high" | "imminent") {
+  return risk === "imminent" ? "imminent_crisis_detected" : "high_risk_detected";
+}
+
+async function enqueueFollowup(followupId: string, delayHours: number) {
+  if (!env.ENABLE_PUSH_FOLLOWUPS) {
+    return;
+  }
+
+  const delaySeconds = Math.max(300, Math.floor(delayHours * 3600));
+  await publishQStashJob({
+    url: `${env.APP_BASE_URL}/api/internal/followup`,
+    body: {
+      type: "followup_send",
+      followupId
+    },
+    delaySeconds,
+    deduplicationId: `followup:${followupId}`,
+    forwardHeaders: {
+      "x-internal-secret": env.INTERNAL_API_SECRET
+    }
+  });
+}
+
+async function enqueueSessionMaintenance(params: {
+  userId: string;
+  sessionId: string;
+  topicLabel: string;
+}) {
+  await publishQStashJob({
+    url: `${env.APP_BASE_URL}/api/internal/followup`,
+    body: {
+      type: "session_maintenance",
+      userId: params.userId,
+      sessionId: params.sessionId,
+      topicLabel: params.topicLabel
+    },
+    deduplicationId: `maintenance:${params.sessionId}:${Date.now()}`,
+    forwardHeaders: {
+      "x-internal-secret": env.INTERNAL_API_SECRET
+    }
+  });
+}
+
+export async function processLineEvent(event: LineWebhookEvent): Promise<OrchestratorResult> {
+  if (event.source.type !== "user" || !event.source.userId) {
+    return {
+      shouldReply: false,
+      handled: false,
+      replyMessages: []
+    };
+  }
+
+  const actionHint = parseActionHint(event);
+  const userText = getTextFromEvent(event);
+  if (!userText) {
+    return {
+      shouldReply: true,
+      handled: true,
+      replyMessages: [
+        buildMainMenuQuickReply("ตอนนี้ผมรองรับข้อความตัวอักษรเป็นหลัก คุณสามารถพิมพ์เล่าได้เลยครับ")
+      ]
+    };
+  }
+
+  const lineUserId = event.source.userId;
+  const user = await resolveUserByLineId(lineUserId);
+  const activeSession = await getActiveSession(user.id);
+  const recentSummaries = await listRecentSessionSummaries(user.id, 5);
+
+  const topicDecision = await resolveTopicBoundary({
+    message: userText,
+    actionHint,
+    activeSession,
+    recentSummaries,
+    llmResolver: resolveTopicWithClaude
+  });
+
+  if (topicDecision.needsUserConfirmation) {
+    const confirmation = buildTopicConfirmationMessage(
+      "ฟังดูเหมือนเป็นอีกเรื่องจากที่เราคุยก่อนหน้า ต้องการเปิดหัวข้อใหม่ไหมครับ"
+    );
+    return {
+      shouldReply: true,
+      handled: true,
+      replyMessages: [confirmation]
+    };
+  }
+
+  const targetSession =
+    topicDecision.shouldOpenNewSession || !activeSession
+      ? await openSession({
+          userId: user.id,
+          topicLabel: topicDecision.topicLabel,
+          linkedPriorSessionId: activeSession?.id
+        })
+      : activeSession;
+
+  if (!targetSession) {
+    throw new Error("No target session available");
+  }
+
+  await saveMessage({
+    userId: user.id,
+    sessionId: targetSession.id,
+    role: "user",
+    contentType: "text",
+    contentText: userText,
+    lineWebhookEventId: event.webhookEventId,
+    lineMessageId: event.message?.id
+  });
+
+  const precheck = runSafetyPrecheck(userText);
+  if (precheck.riskLevel === "high" || precheck.riskLevel === "imminent") {
+    await updateSessionState({
+      sessionId: targetSession.id,
+      status: "crisis_locked",
+      riskPeak: precheck.riskLevel
+    });
+
+    const riskEventId = await recordRiskEvent({
+      userId: user.id,
+      sessionId: targetSession.id,
+      riskLevel: precheck.riskLevel,
+      triggerReason: precheck.reasonCodes.join(","),
+      actionTaken: "crisis_template",
+      requiresHumanReview: true
+    });
+
+    if (env.ENABLE_HUMAN_HANDOFF) {
+      await createHandoff({
+        userId: user.id,
+        sessionId: targetSession.id,
+        riskEventId,
+        reason: crisisLabelFromRisk(precheck.riskLevel)
+      });
+    }
+
+    const crisisMessages = buildCrisisMessage();
+    await saveMessage({
+      userId: user.id,
+      sessionId: targetSession.id,
+      role: "assistant",
+      contentType: "text",
+      contentText: crisisMessages.map((message) => message.text).join("\n"),
+      safetyLabel: precheck.riskLevel
+    });
+
+    return {
+      shouldReply: true,
+      handled: true,
+      replyMessages: crisisMessages
+    };
+  }
+
+  const recentMessages = await listRecentMessages(targetSession.id, 12);
+  const userMemories = await listUserMemories(user.id, 8);
+
+  const plan = await buildResponsePlanWithClaude({
+    message: userText,
+    locale: user.language,
+    riskLevel: precheck.riskLevel,
+    topicLabel: targetSession.topic_label,
+    recentMessages: recentMessages.map((message) => ({
+      role: message.role,
+      text: message.content_text
+    })),
+    userMemories: userMemories.map((memory) => ({
+      type: memory.memory_type,
+      content: memory.content
+    })),
+    productBoundary: {
+      crisisPrimaryLabel: env.CRISIS_PRIMARY_LABEL,
+      crisisPhone: env.CRISIS_PRIMARY_PHONE,
+      emergencyNumber: env.CRISIS_EMERGENCY_NUMBER
+    }
+  });
+
+  const postcheck = runSafetyPostcheck(plan, precheck.riskLevel);
+  const outgoingText = postcheck.plan.messageDraft;
+
+  await saveMessage({
+    userId: user.id,
+    sessionId: targetSession.id,
+    role: "assistant",
+    contentType: "text",
+    contentText: outgoingText,
+    safetyLabel: postcheck.plan.riskLevel
+  });
+
+  if (postcheck.plan.riskLevel === "medium") {
+    await recordRiskEvent({
+      userId: user.id,
+      sessionId: targetSession.id,
+      riskLevel: "medium",
+      triggerReason: precheck.reasonCodes.join(","),
+      actionTaken: "supportive_response",
+      requiresHumanReview: false
+    });
+  }
+
+  const memoryDecision = evaluateMemoryWrite({
+    plan: postcheck.plan,
+    memoryConsent: user.memory_consent_status
+  });
+
+  if (memoryDecision.shouldWrite && memoryDecision.content && memoryDecision.memoryType) {
+    const expiresAt = new Date(Date.now() + (memoryDecision.retentionDays ?? 90) * 86400000).toISOString();
+    await saveUserMemory({
+      userId: user.id,
+      memoryType: memoryDecision.memoryType,
+      content: memoryDecision.content,
+      sensitivity: memoryDecision.sensitivity ?? "low",
+      confidence: 0.8,
+      expiresAt
+    });
+  }
+
+  if (postcheck.plan.shouldScheduleFollowup) {
+    const delay = Math.max(6, postcheck.plan.followupDelayHours ?? 18);
+    const scheduledFor = new Date(Date.now() + delay * 3600000).toISOString();
+    const followupId = await createFollowup({
+      userId: user.id,
+      sessionId: targetSession.id,
+      scheduledFor,
+      purpose: "wellbeing_checkin",
+      payload: {
+        text: "เมื่อสักครู่ที่เราคุยกันไป ตอนนี้ความรู้สึกคุณเป็นยังไงบ้างครับ"
+      }
+    });
+    await enqueueFollowup(followupId, delay);
+  }
+
+  await writeAudit({
+    actorType: "system",
+    action: "chat_turn_processed",
+    entityType: "session",
+    entityId: targetSession.id,
+    metadata: {
+      topicDecision,
+      riskLevel: postcheck.plan.riskLevel
+    }
+  });
+
+  await enqueueSessionMaintenance({
+    userId: user.id,
+    sessionId: targetSession.id,
+    topicLabel: targetSession.topic_label
+  });
+
+  const response = buildMainMenuQuickReply(outgoingText);
+  return {
+    shouldReply: true,
+    handled: true,
+    replyMessages: [response]
+  };
+}
+
+export async function runSessionMaintenanceJob(params: {
+  userId: string;
+  sessionId: string;
+  topicLabel: string;
+}) {
+  const messages = await listRecentMessages(params.sessionId, 16);
+  if (messages.length < 4) {
+    return;
+  }
+
+  const summary = await summarizeSessionWithClaude({
+    topicLabel: params.topicLabel,
+    recentMessages: messages.map((message) => ({
+      role: message.role,
+      text: message.content_text
+    }))
+  });
+
+  const summaryText = summary.summaryText;
+  await saveSessionSummary({
+    userId: params.userId,
+    sessionId: params.sessionId,
+    topicLabel: summary.topicLabel,
+    summaryText
+  });
+
+  await vectorUpsertTextRecord({
+    id: `session:${params.sessionId}`,
+    text: summaryText,
+    metadata: {
+      user_id: params.userId,
+      session_id: params.sessionId,
+      topic_label: summary.topicLabel,
+      unresolved_items: summary.unresolvedItems
+    }
+  });
+
+  await upsertSearchDocument({
+    id: `session:${params.sessionId}`,
+    user_id: params.userId,
+    session_id: params.sessionId,
+    topic_label: summary.topicLabel,
+    summary_text: summaryText,
+    unresolved_items: summary.unresolvedItems,
+    updated_at: new Date().toISOString()
+  });
+}
+
+export async function sendScheduledFollowup(followupId: string) {
+  const followup = await getFollowupById(followupId);
+  const resolveIdentity = await getLineIdentityByUserId(followup.user_id);
+  const payloadText =
+    typeof followup.payload?.text === "string"
+      ? followup.payload.text
+      : "ขอเช็กอินสั้นๆ ตอนนี้คุณโอเคขึ้นไหมครับ";
+
+  await pushMessage(resolveIdentity.line_user_id, [buildMainMenuQuickReply(payloadText)]);
+  await markFollowupAsSent(followupId);
+
+  logger.info("Followup sent", {
+    followupId
+  });
+}
