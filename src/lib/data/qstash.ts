@@ -28,13 +28,26 @@ export async function publishQStashJob(options: PublishOptions) {
     token: env.QSTASH_TOKEN
   });
 
-  return client.publishJSON({
+  const request = {
     url: options.url,
     body: options.body,
     delay: options.delaySeconds,
     deduplicationId: sanitizeDeduplicationId(options.deduplicationId),
     headers: options.forwardHeaders
-  });
+  };
+
+  try {
+    return await client.publishJSON(request);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes("DeduplicationId")) {
+      return client.publishJSON({
+        ...request,
+        deduplicationId: undefined
+      });
+    }
+    throw error;
+  }
 }
 
 export async function verifyQStashSignature(params: {

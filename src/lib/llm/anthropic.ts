@@ -52,6 +52,49 @@ function parseStructuredJson<T>(rawText: string): T | null {
   return safeJsonParse<T>(maybeJson);
 }
 
+function fallbackTopicDecision(parsed: unknown): Partial<TopicDecision> | null {
+  if (!parsed || typeof parsed !== "object") {
+    return null;
+  }
+
+  const data = parsed as Record<string, unknown>;
+  const topicCandidate = [data.topic_label, data.topic, data.topicLabel]
+    .find((value) => typeof value === "string" && value.trim().length > 0);
+
+  const confidenceRaw = data.confidence;
+  const confidence =
+    typeof confidenceRaw === "number"
+      ? confidenceRaw
+      : typeof confidenceRaw === "string"
+        ? Number(confidenceRaw)
+        : 0.5;
+
+  const isNewTopicRaw = data.is_new_topic;
+  const isNewTopic =
+    typeof isNewTopicRaw === "boolean"
+      ? isNewTopicRaw
+      : typeof isNewTopicRaw === "string"
+        ? isNewTopicRaw.toLowerCase() === "true"
+        : false;
+
+  return {
+    isNewTopic,
+    confidence: Number.isFinite(confidence) ? Math.min(1, Math.max(0, confidence)) : 0.5,
+    topicLabel: topicCandidate ? String(topicCandidate) : "general_support",
+    relationToPrevious:
+      data.relation_to_previous === "shift" || data.relation_to_previous === "reopen"
+        ? (data.relation_to_previous as "shift" | "reopen")
+        : "same",
+    shouldOpenNewSession:
+      typeof data.should_open_new_session === "boolean" ? data.should_open_new_session : undefined,
+    shouldReopenPriorSessionId:
+      typeof data.should_reopen_prior_session_id === "string"
+        ? data.should_reopen_prior_session_id
+        : undefined,
+    reason: typeof data.reason === "string" ? data.reason : "llm_topic_resolver_fallback"
+  };
+}
+
 export async function resolveTopicWithClaude(params: {
   message: string;
   activeTopic: string | null;
@@ -90,6 +133,14 @@ export async function resolveTopicWithClaude(params: {
 
   const validated = topicDecisionSchema.safeParse(parsed);
   if (!validated.success) {
+    const fallback = fallbackTopicDecision(parsed);
+    if (fallback) {
+      logger.warn("Topic resolver schema mismatch, using fallback parse", {
+        issues: validated.error.issues
+      });
+      return fallback;
+    }
+
     logger.warn("Topic resolver json schema mismatch", {
       issues: validated.error.issues
     });

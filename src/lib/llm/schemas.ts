@@ -18,9 +18,9 @@ export const topicDecisionSchema = z
   .object({
     is_new_topic: booleanLike.default(false),
     confidence: numberLike.default(0.5),
-    topic_label: z.string().optional(),
-    topic: z.string().optional(),
-    topicLabel: z.string().optional(),
+    topic_label: z.string().nullable().optional(),
+    topic: z.string().nullable().optional(),
+    topicLabel: z.string().nullable().optional(),
     relation_to_previous: z.enum(["same", "shift", "reopen"]).default("same"),
     should_open_new_session: booleanLike.optional(),
     should_reopen_prior_session_id: z.string().nullable().optional(),
