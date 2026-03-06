@@ -1,14 +1,40 @@
 import { z } from "zod";
 
-export const topicDecisionSchema = z.object({
-  is_new_topic: z.boolean(),
-  confidence: z.number().min(0).max(1),
-  topic_label: z.string(),
-  relation_to_previous: z.enum(["same", "shift", "reopen"]).default("same"),
-  should_open_new_session: z.boolean().optional(),
-  should_reopen_prior_session_id: z.string().nullable().optional(),
-  reason: z.string().default("llm_topic_resolver")
-});
+const booleanLike = z.union([z.boolean(), z.enum(["true", "false"])])
+  .transform((value) => (typeof value === "boolean" ? value : value === "true"));
+
+const numberLike = z.union([z.number(), z.string()])
+  .transform((value) => {
+    if (typeof value === "number") {
+      return value;
+    }
+
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : 0.5;
+  })
+  .pipe(z.number().min(0).max(1));
+
+export const topicDecisionSchema = z
+  .object({
+    is_new_topic: booleanLike.default(false),
+    confidence: numberLike.default(0.5),
+    topic_label: z.string().optional(),
+    topic: z.string().optional(),
+    topicLabel: z.string().optional(),
+    relation_to_previous: z.enum(["same", "shift", "reopen"]).default("same"),
+    should_open_new_session: booleanLike.optional(),
+    should_reopen_prior_session_id: z.string().nullable().optional(),
+    reason: z.string().default("llm_topic_resolver")
+  })
+  .transform((data) => ({
+    is_new_topic: data.is_new_topic,
+    confidence: data.confidence,
+    topic_label: data.topic_label ?? data.topic ?? data.topicLabel ?? "general_support",
+    relation_to_previous: data.relation_to_previous,
+    should_open_new_session: data.should_open_new_session,
+    should_reopen_prior_session_id: data.should_reopen_prior_session_id,
+    reason: data.reason
+  }));
 
 export const responsePlanSchema = z.object({
   mode: z.enum([

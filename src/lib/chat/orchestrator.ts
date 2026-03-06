@@ -81,7 +81,7 @@ async function enqueueFollowup(followupId: string, delayHours: number) {
       followupId
     },
     delaySeconds,
-    deduplicationId: `followup:${followupId}`,
+    deduplicationId: `followup-${followupId}`,
     forwardHeaders: {
       "x-internal-secret": env.INTERNAL_API_SECRET
     }
@@ -101,7 +101,7 @@ async function enqueueSessionMaintenance(params: {
       sessionId: params.sessionId,
       topicLabel: params.topicLabel
     },
-    deduplicationId: `maintenance:${params.sessionId}:${Date.now()}`,
+    deduplicationId: `maintenance-${params.sessionId}-${Date.now()}`,
     forwardHeaders: {
       "x-internal-secret": env.INTERNAL_API_SECRET
     }

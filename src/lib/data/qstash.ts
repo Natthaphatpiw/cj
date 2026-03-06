@@ -9,6 +9,20 @@ type PublishOptions = {
   forwardHeaders?: Record<string, string>;
 };
 
+function sanitizeDeduplicationId(value?: string) {
+  if (!value) {
+    return undefined;
+  }
+
+  const sanitized = value
+    .trim()
+    .replace(/[^a-zA-Z0-9_-]/g, "-")
+    .replace(/-+/g, "-")
+    .slice(0, 120);
+
+  return sanitized.length > 0 ? sanitized : undefined;
+}
+
 export async function publishQStashJob(options: PublishOptions) {
   const client = new Client({
     token: env.QSTASH_TOKEN
@@ -18,7 +32,7 @@ export async function publishQStashJob(options: PublishOptions) {
     url: options.url,
     body: options.body,
     delay: options.delaySeconds,
-    deduplicationId: options.deduplicationId,
+    deduplicationId: sanitizeDeduplicationId(options.deduplicationId),
     headers: options.forwardHeaders
   });
 }
