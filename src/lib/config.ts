@@ -2,6 +2,13 @@ import { z } from "zod";
 
 const trueFalse = z.enum(["true", "false"]).transform((value) => value === "true");
 const nonEmpty = z.string().min(1).default("__MISSING__");
+const loadingSecondsSchema = z
+  .coerce
+  .number()
+  .int()
+  .min(5)
+  .max(60)
+  .default(20);
 const optionalString = z.preprocess(
   (value) => (value === "" ? undefined : value),
   z.string().optional()
@@ -29,6 +36,8 @@ const serverSchema = z.object({
   LINE_RICH_MENU_CRISIS_ID: optionalString,
   LINE_ENABLE_PUSH: trueFalse.default(true),
   LINE_ENABLE_RICH_MENU: trueFalse.default(true),
+  LINE_ENABLE_LOADING_ANIMATION: trueFalse.default(true),
+  LINE_LOADING_SECONDS: loadingSecondsSchema,
   LINE_LOGIN_CHANNEL_ID: optionalString,
   LINE_LOGIN_CHANNEL_SECRET: optionalString,
   LINE_LOGIN_REDIRECT_URI: optionalUrl,

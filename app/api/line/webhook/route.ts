@@ -4,7 +4,7 @@ import { env } from "@/lib/config";
 import { processLineEvent } from "@/lib/chat/orchestrator";
 import { acquireDedupLock, checkAndConsumeRateLimit, withSessionLock } from "@/lib/data/redis";
 import { recordWebhookEvent } from "@/lib/data/repositories";
-import { replyMessage } from "@/lib/line/client";
+import { replyMessage, tryDisplayLoadingAnimation } from "@/lib/line/client";
 import { verifyLineSignature } from "@/lib/line/signature";
 import type { LineWebhookEvent, LineWebhookPayload } from "@/lib/line/types";
 import { logger } from "@/lib/logger";
@@ -37,6 +37,9 @@ export async function POST(request: Request) {
 
   for (const event of payload.events) {
     const eventId = deriveEventId(event);
+    const isOneOnOneChat = event.source.type === "user" && Boolean(event.source.userId);
+    const lineUserId = isOneOnOneChat ? event.source.userId : undefined;
+
     try {
       const lock = await acquireDedupLock(eventId);
       if (!lock) {
@@ -51,8 +54,8 @@ export async function POST(request: Request) {
         isRedelivery: Boolean(event.deliveryContext?.isRedelivery)
       });
 
-      if (event.source.userId) {
-        const rate = await checkAndConsumeRateLimit(event.source.userId);
+      if (lineUserId) {
+        const rate = await checkAndConsumeRateLimit(lineUserId);
         if (!rate.allowed) {
           if (event.replyToken) {
             await replyMessage(event.replyToken, [
@@ -66,6 +69,10 @@ export async function POST(request: Request) {
         }
       }
 
+      if (lineUserId && event.type === "message") {
+        await tryDisplayLoadingAnimation(lineUserId, env.LINE_LOADING_SECONDS);
+      }
+
       const handle = async () => {
         const result = await processLineEvent(event);
         if (result.shouldReply && event.replyToken) {
@@ -73,8 +80,8 @@ export async function POST(request: Request) {
         }
       };
 
-      if (event.source.userId) {
-        await withSessionLock(event.source.userId, handle);
+      if (lineUserId) {
+        await withSessionLock(lineUserId, handle);
       } else {
         await handle();
       }

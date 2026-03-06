@@ -39,6 +39,32 @@ export async function pushMessage(to: string, messages: LineMessage[]) {
   });
 }
 
+function clampLoadingSeconds(seconds: number) {
+  return Math.min(60, Math.max(5, Math.floor(seconds)));
+}
+
+export async function displayLoadingAnimation(chatId: string, loadingSeconds = env.LINE_LOADING_SECONDS) {
+  if (!env.LINE_ENABLE_LOADING_ANIMATION) {
+    return;
+  }
+
+  await lineRequest("/chat/loading/start", {
+    chatId,
+    loadingSeconds: clampLoadingSeconds(loadingSeconds)
+  });
+}
+
+export async function tryDisplayLoadingAnimation(chatId: string, loadingSeconds = env.LINE_LOADING_SECONDS) {
+  try {
+    await displayLoadingAnimation(chatId, loadingSeconds);
+  } catch (error) {
+    logger.warn("Failed to display LINE loading animation", {
+      chatId,
+      error: error instanceof Error ? error.message : "unknown_error"
+    });
+  }
+}
+
 export async function fetchLineProfile(userId: string) {
   const response = await fetch(`${baseUrl}/profile/${userId}`, {
     method: "GET",
