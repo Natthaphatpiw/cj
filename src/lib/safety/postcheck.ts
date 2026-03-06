@@ -8,6 +8,30 @@ const forbiddenPatterns = [
   /ทำตามนี้แล้วจะหายแน่นอน/i
 ];
 
+function normalizeConversationalStyle(text: string) {
+  let normalized = text;
+  normalized = normalized.replace(/\*\*/g, "");
+  normalized = normalized.replace(/`/g, "");
+  normalized = normalized.replace(/^#{1,6}\s*/gm, "");
+  normalized = normalized.replace(/^\s*[-•]\s+/gm, "");
+  normalized = normalized.replace(/[ \t]+\n/g, "\n");
+  normalized = normalized.replace(/\n{3,}/g, "\n\n");
+
+  const lines = normalized
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  if (lines.length >= 3) {
+    normalized = lines.join(" ");
+  } else {
+    normalized = lines.join("\n");
+  }
+
+  normalized = normalized.replace(/\s{2,}/g, " ").trim();
+  return normalized;
+}
+
 function sanitizeText(text: string) {
   let sanitized = text.trim();
   if (sanitized.length === 0) {
@@ -16,7 +40,7 @@ function sanitizeText(text: string) {
 
   sanitized = sanitized.replaceAll("I am your therapist", "I am a support assistant");
   sanitized = sanitized.replaceAll("ฉันเป็นนักบำบัดของคุณ", "ผมเป็นผู้ช่วยด้านการดูแลใจเบื้องต้น");
-  return sanitized;
+  return normalizeConversationalStyle(sanitized);
 }
 
 export function runSafetyPostcheck(plan: ResponsePlan, preRiskLevel: RiskLevel) {
