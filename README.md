@@ -23,7 +23,7 @@ Use free tiers where possible:
 8. Optional free tools: Sentry, PostHog, Cloudflare Turnstile
 
 Anthropic Claude API is required and paid.
-
+grbjj
 ## Local setup
 
 1. Install dependencies
