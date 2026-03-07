@@ -52,6 +52,35 @@ function parseStructuredJson<T>(rawText: string): T | null {
   return safeJsonParse<T>(maybeJson);
 }
 
+function buildPlannerFallback(params: {
+  riskLevel: "low" | "medium" | "high" | "imminent";
+  topicLabel: string;
+  rawText?: string;
+}): ResponsePlan {
+  const rawCandidate = params.rawText?.replace(/\s+/g, " ").trim();
+  const lowRiskDraft =
+    "ขอบคุณที่เล่าให้ฟังนะ เรื่องนี้กดดันใจมากจริงๆ เราไม่ต้องรีบแก้ทุกอย่างในครั้งเดียว ตอนนี้อยากให้เราเริ่มแบบไหนดี ระบายต่ออีกหน่อย / ช่วยเรียงความคิดในหัว / พักหายใจช้าๆ 1 นาที";
+  const mediumRiskDraft =
+    "ขอบคุณที่ไว้ใจเล่าให้ฟังนะ ตอนนี้ความเครียดค่อนข้างหนักกับใจ เราจะค่อยๆ จัดการทีละจุดแบบไม่กดดันเกินไป ตอนนี้อยากให้ช่วยแบบไหนดี ระบายสิ่งที่หนักสุดก่อน / ช่วยจัดลำดับเรื่องที่ค้างในหัว / พักใจสั้นๆ ก่อน";
+
+  const messageDraft =
+    rawCandidate && rawCandidate.length >= 16
+      ? rawCandidate.slice(0, 1200)
+      : params.riskLevel === "medium"
+        ? mediumRiskDraft
+        : lowRiskDraft;
+
+  return {
+    mode: params.riskLevel === "medium" ? "grounding_coach" : "reflective_listener",
+    riskLevel: params.riskLevel,
+    topic: params.topicLabel,
+    needsHandoff: false,
+    shouldScheduleFollowup: params.riskLevel === "medium",
+    followupDelayHours: params.riskLevel === "medium" ? 12 : undefined,
+    messageDraft
+  };
+}
+
 function fallbackTopicDecision(parsed: unknown): Partial<TopicDecision> | null {
   if (!parsed || typeof parsed !== "object") {
     return null;
@@ -191,85 +220,114 @@ export async function buildResponsePlanWithClaude(params: {
     "If risk is high/imminent, choose crisis_mode and include immediate support options."
   ].join("\n");
 
-  const raw = await callClaude({
-    model: env.ANTHROPIC_MODEL_PRIMARY,
-    system: systemPrompt,
-    user: JSON.stringify(
-      {
-        latest_message: params.message,
-        locale: params.locale,
-        risk_level_from_precheck: params.riskLevel,
-        topic_label: params.topicLabel,
-        recent_messages: params.recentMessages,
-        user_memories: params.userMemories,
-        product_boundary: params.productBoundary,
-        style_targets: {
-          primary_goal:
-            "make the user feel understood, emotionally held, and slightly better in this turn",
-          natural_human_tone: true,
-          therapist_informed_tone: true,
-          paragraph_layout_only: true,
-          no_markdown_syntax: true,
-          no_checklist_by_default: true,
-          avoid_excessive_emoji: true,
-          max_sentences_non_crisis: 6,
-          must_include: [
-            "specific emotional validation from user wording",
-            "one gentle psychological reframe",
-            "one immediate micro-step",
-            "one low-friction closing question"
-          ],
-          closing_question_pattern:
-            "one gentle question with options, such as: ตอนนี้อยากให้เราเริ่มแบบไหนดี ระบายต่อ / จัดการความคิดไม่พอในหัวก่อน / พักใจ 1 นาที"
-        },
-        avoid_phrases: [
-          "โอ้",
-          "ได้ยินแล้ว",
-          "ลองทำสิ่งเหล่านี้ดูได้เลย",
-          "นี่คือวิธี",
-          "checklist",
-          "step 1",
-          "step 2",
-          "**",
-          "\""
-        ],
-        required_schema: {
-          mode: "gentle_short | reflective_listener | grounding_coach | psychoeducation_light | crisis_mode",
-          risk_level: "low | medium | high | imminent",
-          topic: "string",
-          needs_handoff: "boolean",
-          should_schedule_followup: "boolean",
-          followup_delay_hours: "number (optional)",
-          memory_candidate: {
-            type: "preference | stable_fact | support_pattern",
-            content: "string",
-            sensitivity: "low | medium | high"
+  let raw = "";
+  try {
+    raw = await callClaude({
+      model: env.ANTHROPIC_MODEL_PRIMARY,
+      system: systemPrompt,
+      user: JSON.stringify(
+        {
+          latest_message: params.message,
+          locale: params.locale,
+          risk_level_from_precheck: params.riskLevel,
+          topic_label: params.topicLabel,
+          recent_messages: params.recentMessages,
+          user_memories: params.userMemories,
+          product_boundary: params.productBoundary,
+          style_targets: {
+            primary_goal:
+              "make the user feel understood, emotionally held, and slightly better in this turn",
+            natural_human_tone: true,
+            therapist_informed_tone: true,
+            paragraph_layout_only: true,
+            no_markdown_syntax: true,
+            no_checklist_by_default: true,
+            avoid_excessive_emoji: true,
+            max_sentences_non_crisis: 6,
+            must_include: [
+              "specific emotional validation from user wording",
+              "one gentle psychological reframe",
+              "one immediate micro-step",
+              "one low-friction closing question"
+            ],
+            closing_question_pattern:
+              "one gentle question with options, such as: ตอนนี้อยากให้เราเริ่มแบบไหนดี ระบายต่อ / จัดการความคิดไม่พอในหัวก่อน / พักใจ 1 นาที"
           },
-          message_draft: "string"
-        }
-      },
-      null,
-      2
-    ),
-    maxTokens: 700,
-    temperature: 0.15
-  });
+          avoid_phrases: [
+            "โอ้",
+            "ได้ยินแล้ว",
+            "ลองทำสิ่งเหล่านี้ดูได้เลย",
+            "นี่คือวิธี",
+            "checklist",
+            "step 1",
+            "step 2",
+            "**",
+            "\""
+          ],
+          required_schema: {
+            mode: "gentle_short | reflective_listener | grounding_coach | psychoeducation_light | crisis_mode",
+            risk_level: "low | medium | high | imminent",
+            topic: "string",
+            needs_handoff: "boolean",
+            should_schedule_followup: "boolean",
+            followup_delay_hours: "number (optional)",
+            memory_candidate: {
+              type: "preference | stable_fact | support_pattern",
+              content: "string",
+              sensitivity: "low | medium | high"
+            },
+            message_draft: "string"
+          }
+        },
+        null,
+        2
+      ),
+      maxTokens: 700,
+      temperature: 0.15
+    });
+  } catch (error) {
+    logger.error("Claude response planner request failed", {
+      error: error instanceof Error ? error.message : "unknown_error"
+    });
+    return buildPlannerFallback({
+      riskLevel: params.riskLevel,
+      topicLabel: params.topicLabel
+    });
+  }
 
   const parsed = parseStructuredJson<unknown>(raw);
   if (!parsed) {
-    throw new Error("Claude response planner returned non-json output");
+    logger.warn("Claude response planner returned non-json output, using fallback", {
+      rawPreview: raw.slice(0, 300)
+    });
+    return buildPlannerFallback({
+      riskLevel: params.riskLevel,
+      topicLabel: params.topicLabel,
+      rawText: raw
+    });
   }
 
-  const validated = responsePlanSchema.parse(parsed);
+  const validated = responsePlanSchema.safeParse(parsed);
+  if (!validated.success) {
+    logger.warn("Claude response planner schema mismatch, using fallback", {
+      issues: validated.error.issues
+    });
+    return buildPlannerFallback({
+      riskLevel: params.riskLevel,
+      topicLabel: params.topicLabel,
+      rawText: raw
+    });
+  }
+
   return {
-    mode: validated.mode,
-    riskLevel: validated.risk_level,
-    topic: validated.topic,
-    needsHandoff: validated.needs_handoff,
-    shouldScheduleFollowup: validated.should_schedule_followup,
-    followupDelayHours: validated.followup_delay_hours,
-    memoryCandidate: validated.memory_candidate,
-    messageDraft: validated.message_draft
+    mode: validated.data.mode,
+    riskLevel: validated.data.risk_level,
+    topic: validated.data.topic,
+    needsHandoff: validated.data.needs_handoff,
+    shouldScheduleFollowup: validated.data.should_schedule_followup,
+    followupDelayHours: validated.data.followup_delay_hours,
+    memoryCandidate: validated.data.memory_candidate,
+    messageDraft: validated.data.message_draft
   };
 }
 
