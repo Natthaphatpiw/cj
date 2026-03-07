@@ -56,7 +56,7 @@ export const responsePlanSchema = z.object({
       sensitivity: z.enum(["low", "medium", "high"])
     })
     .optional(),
-  message_draft: z.string().min(1)
+  message_draft: z.string().min(1).max(1200)
 });
 
 export const sessionSummarySchema = z.object({

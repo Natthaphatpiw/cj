@@ -55,20 +55,24 @@ function parseStructuredJson<T>(rawText: string): T | null {
 function buildPlannerFallback(params: {
   riskLevel: "low" | "medium" | "high" | "imminent";
   topicLabel: string;
-  rawText?: string;
+  userMessage: string;
 }): ResponsePlan {
-  const rawCandidate = params.rawText?.replace(/\s+/g, " ").trim();
+  const normalizedInput = params.userMessage.toLowerCase();
+  const isAcuteHardshipCase =
+    /รถชน|อุบัติเหตุ|ขาหัก|ไม่มีรายได้|นมผง|ลูกเล็ก|ทารก|baby|financial|debt|เงิน/i.test(
+      normalizedInput
+    );
   const lowRiskDraft =
     "ขอบคุณที่เล่าให้ฟังนะ เรื่องนี้กดดันใจมากจริงๆ เราไม่ต้องรีบแก้ทุกอย่างในครั้งเดียว ตอนนี้อยากให้เราเริ่มแบบไหนดี ระบายต่ออีกหน่อย / ช่วยเรียงความคิดในหัว / พักหายใจช้าๆ 1 นาที";
   const mediumRiskDraft =
     "ขอบคุณที่ไว้ใจเล่าให้ฟังนะ ตอนนี้ความเครียดค่อนข้างหนักกับใจ เราจะค่อยๆ จัดการทีละจุดแบบไม่กดดันเกินไป ตอนนี้อยากให้ช่วยแบบไหนดี ระบายสิ่งที่หนักสุดก่อน / ช่วยจัดลำดับเรื่องที่ค้างในหัว / พักใจสั้นๆ ก่อน";
-
-  const messageDraft =
-    rawCandidate && rawCandidate.length >= 16
-      ? rawCandidate.slice(0, 1200)
-      : params.riskLevel === "medium"
-        ? mediumRiskDraft
-        : lowRiskDraft;
+  const hardshipDraft =
+    "เรื่องที่คุณกำลังเจอมันหนักมากจริงๆ ทั้งบาดเจ็บ ร่างกายยังไม่ฟื้น รายได้หาย และยังต้องดูแลลูกเล็กไปพร้อมกัน ความรู้สึกเครียดจนแทบนอนไม่ได้ไม่ใช่ความอ่อนแอเลยนะ\n\nตอนนี้เราจับแค่เรื่องเร่งด่วนที่สุดก่อนเรื่องเดียวก็พอ คือให้น้องมีนมต่อเนื่องวันนี้ก่อน จากนั้นค่อยไล่ทีละขั้น\n\nถ้าสะดวก เราช่วยคุณพิมพ์ข้อความขอความช่วยเหลือสั้นๆ ที่ส่งให้หน่วยงานหรือคนใกล้ตัวได้ทันทีนะ ตอนนี้อยากให้เริ่มแบบไหนดี ระบายต่ออีกนิด / ให้ช่วยร่างข้อความขอช่วยเหลือ / ช่วยเรียงแผน 3 ข้อแรก";
+  const messageDraft = isAcuteHardshipCase
+    ? hardshipDraft
+    : params.riskLevel === "medium"
+      ? mediumRiskDraft
+      : lowRiskDraft;
 
   return {
     mode: params.riskLevel === "medium" ? "grounding_coach" : "reflective_listener",
@@ -276,7 +280,7 @@ export async function buildResponsePlanWithClaude(params: {
               content: "string",
               sensitivity: "low | medium | high"
             },
-            message_draft: "string"
+            message_draft: "string (max 1200 chars, end with one gentle question)"
           }
         },
         null,
@@ -291,7 +295,8 @@ export async function buildResponsePlanWithClaude(params: {
     });
     return buildPlannerFallback({
       riskLevel: params.riskLevel,
-      topicLabel: params.topicLabel
+      topicLabel: params.topicLabel,
+      userMessage: params.message
     });
   }
 
@@ -303,7 +308,7 @@ export async function buildResponsePlanWithClaude(params: {
     return buildPlannerFallback({
       riskLevel: params.riskLevel,
       topicLabel: params.topicLabel,
-      rawText: raw
+      userMessage: params.message,
     });
   }
 
@@ -315,7 +320,7 @@ export async function buildResponsePlanWithClaude(params: {
     return buildPlannerFallback({
       riskLevel: params.riskLevel,
       topicLabel: params.topicLabel,
-      rawText: raw
+      userMessage: params.message,
     });
   }
 

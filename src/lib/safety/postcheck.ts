@@ -16,6 +16,15 @@ const awkwardOpeners = [
 
 function normalizeConversationalStyle(text: string) {
   let normalized = text;
+
+  const messageDraftMatch = normalized.match(/message_draft\s*[:=]\s*([\s\S]*)$/i);
+  if (messageDraftMatch?.[1]) {
+    normalized = messageDraftMatch[1];
+  }
+
+  normalized = normalized.replace(/^\s*json\s*/i, "");
+  normalized = normalized.replace(/^[\[{]\s*/, "");
+  normalized = normalized.replace(/\s*[\]}]\s*$/, "");
   normalized = normalized.replace(/\*\*/g, "");
   normalized = normalized.replace(/__/g, "");
   normalized = normalized.replace(/`/g, "");
