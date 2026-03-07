@@ -68,6 +68,41 @@ function crisisLabelFromRisk(risk: "high" | "imminent") {
   return risk === "imminent" ? "imminent_crisis_detected" : "high_risk_detected";
 }
 
+function userAsksImmediateAction(message: string) {
+  return /ทำยังไง|ควรทำไง|ควรทำอย่างไร|ต้องทำอะไร|เริ่มจากอะไร|ทางออก|help/i.test(message);
+}
+
+function hasAcuteHardshipSignals(text: string) {
+  return /รถชน|อุบัติเหตุ|ขาหัก|ไม่มีรายได้|นมผง|ลูกเล็ก|ทารก|หนี้|financial|debt/i.test(text);
+}
+
+function isRepetitiveSupportReply(candidate: string, recentMessages: Array<{ role: string; content_text: string }>) {
+  const lastAssistant = [...recentMessages].reverse().find((message) => message.role === "assistant");
+  if (!lastAssistant) {
+    return false;
+  }
+
+  const normalize = (value: string) => value.toLowerCase().replace(/\s+/g, " ").trim();
+  const current = normalize(candidate);
+  const previous = normalize(lastAssistant.content_text);
+
+  if (current === previous) {
+    return true;
+  }
+
+  return (
+    current.includes("ตอนนี้อยากให้เราเริ่มแบบไหนดี") &&
+    previous.includes("ตอนนี้อยากให้เราเริ่มแบบไหนดี")
+  );
+}
+
+function hardshipImmediatePlanReply() {
+  return (
+    "ได้เลย เราโฟกัสแบบทำได้ตอนนี้ทันทีนะ ขั้นแรกโทร 1300 เพื่อขอประสานความช่วยเหลือฉุกเฉินเรื่องของจำเป็นสำหรับเด็กเล็ก ขั้นถัดไปโทรโรงพยาบาลที่รักษาเพื่อขอส่งต่อหน่วยสังคมสงเคราะห์ และขั้นสุดท้ายให้ผมช่วยร่างข้อความสั้นๆ ส่งหาคนใกล้ตัวเพื่อขอช่วยค่านมรอบนี้ก่อน\n\n" +
+    "คุณไม่ได้ล้มเหลวเลยนะ ในสถานการณ์หนักขนาดนี้คุณยังพยายามเพื่อลูกเต็มที่มากแล้ว ตอนนี้อยากให้ผมเริ่มจากร่างข้อความขอความช่วยเหลือให้เลยไหม"
+  );
+}
+
 async function enqueueFollowup(followupId: string, delayHours: number) {
   if (!env.ENABLE_PUSH_FOLLOWUPS) {
     return;
@@ -243,7 +278,15 @@ export async function processLineEvent(event: LineWebhookEvent): Promise<Orchest
   });
 
   const postcheck = runSafetyPostcheck(plan, precheck.riskLevel);
-  const outgoingText = postcheck.plan.messageDraft;
+  let outgoingText = postcheck.plan.messageDraft;
+  const contextCorpus = [userText, ...recentMessages.map((message) => message.content_text)].join(" ");
+  if (
+    userAsksImmediateAction(userText) &&
+    hasAcuteHardshipSignals(contextCorpus) &&
+    isRepetitiveSupportReply(outgoingText, recentMessages)
+  ) {
+    outgoingText = hardshipImmediatePlanReply();
+  }
 
   await saveMessage({
     userId: user.id,

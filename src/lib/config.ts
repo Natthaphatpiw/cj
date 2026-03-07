@@ -8,7 +8,14 @@ const loadingSecondsSchema = z
   .int()
   .min(5)
   .max(60)
-  .default(20);
+  .default(60);
+const loadingRefreshSecondsSchema = z
+  .coerce
+  .number()
+  .int()
+  .min(3)
+  .max(55)
+  .default(15);
 const optionalString = z.preprocess(
   (value) => (value === "" ? undefined : value),
   z.string().optional()
@@ -38,6 +45,7 @@ const serverSchema = z.object({
   LINE_ENABLE_RICH_MENU: trueFalse.default(true),
   LINE_ENABLE_LOADING_ANIMATION: trueFalse.default(true),
   LINE_LOADING_SECONDS: loadingSecondsSchema,
+  LINE_LOADING_REFRESH_SECONDS: loadingRefreshSecondsSchema,
   LINE_LOGIN_CHANNEL_ID: optionalString,
   LINE_LOGIN_CHANNEL_SECRET: optionalString,
   LINE_LOGIN_REDIRECT_URI: optionalUrl,

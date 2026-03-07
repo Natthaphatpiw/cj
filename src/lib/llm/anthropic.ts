@@ -56,10 +56,21 @@ function buildPlannerFallback(params: {
   riskLevel: "low" | "medium" | "high" | "imminent";
   topicLabel: string;
   userMessage: string;
+  recentMessages?: Array<{ role: string; text: string }>;
 }): ResponsePlan {
   const normalizedInput = params.userMessage.toLowerCase();
+  const contextCorpus = [
+    params.userMessage,
+    ...(params.recentMessages ?? []).map((message) => message.text)
+  ]
+    .join(" ")
+    .toLowerCase();
   const isAcuteHardshipCase =
     /รถชน|อุบัติเหตุ|ขาหัก|ไม่มีรายได้|นมผง|ลูกเล็ก|ทารก|baby|financial|debt|เงิน/i.test(
+      contextCorpus
+    );
+  const asksImmediateAction =
+    /ทำยังไง|ควรทำไง|ควรทำอย่างไร|ต้องทำอะไร|เริ่มจากอะไร|ทางออก|ช่วยหน่อย|help/i.test(
       normalizedInput
     );
   const lowRiskDraft =
@@ -68,11 +79,16 @@ function buildPlannerFallback(params: {
     "ขอบคุณที่ไว้ใจเล่าให้ฟังนะ ตอนนี้ความเครียดค่อนข้างหนักกับใจ เราจะค่อยๆ จัดการทีละจุดแบบไม่กดดันเกินไป ตอนนี้อยากให้ช่วยแบบไหนดี ระบายสิ่งที่หนักสุดก่อน / ช่วยจัดลำดับเรื่องที่ค้างในหัว / พักใจสั้นๆ ก่อน";
   const hardshipDraft =
     "เรื่องที่คุณกำลังเจอมันหนักมากจริงๆ ทั้งบาดเจ็บ ร่างกายยังไม่ฟื้น รายได้หาย และยังต้องดูแลลูกเล็กไปพร้อมกัน ความรู้สึกเครียดจนแทบนอนไม่ได้ไม่ใช่ความอ่อนแอเลยนะ\n\nตอนนี้เราจับแค่เรื่องเร่งด่วนที่สุดก่อนเรื่องเดียวก็พอ คือให้น้องมีนมต่อเนื่องวันนี้ก่อน จากนั้นค่อยไล่ทีละขั้น\n\nถ้าสะดวก เราช่วยคุณพิมพ์ข้อความขอความช่วยเหลือสั้นๆ ที่ส่งให้หน่วยงานหรือคนใกล้ตัวได้ทันทีนะ ตอนนี้อยากให้เริ่มแบบไหนดี ระบายต่ออีกนิด / ให้ช่วยร่างข้อความขอช่วยเหลือ / ช่วยเรียงแผน 3 ข้อแรก";
-  const messageDraft = isAcuteHardshipCase
-    ? hardshipDraft
-    : params.riskLevel === "medium"
-      ? mediumRiskDraft
-      : lowRiskDraft;
+  const hardshipActionDraft =
+    "ได้เลย เราจัดแบบทำได้ตอนนี้ทันทีนะ ขั้นแรกโทร 1300 เพื่อขอประสานความช่วยเหลือฉุกเฉินเรื่องเด็กเล็กและของจำเป็น ขั้นถัดไปโทรโรงพยาบาลที่รักษาเพื่อให้ช่วยออกเอกสารหรือส่งต่อหน่วยสังคมสงเคราะห์ และขั้นสุดท้ายให้เราช่วยร่างข้อความสั้นๆ ส่งหาญาติหรือคนใกล้ตัวเพื่อขอช่วยค่านมรอบนี้ก่อน\n\nคุณไม่ได้ล้มเหลวเลยนะ ในสถานการณ์หนักขนาดนี้คุณยังพยายามเพื่อลูกเต็มที่มากแล้ว ตอนนี้อยากให้ผมเริ่มจากร่างข้อความขอความช่วยเหลือให้เลยไหม";
+  const messageDraft =
+    isAcuteHardshipCase && asksImmediateAction
+      ? hardshipActionDraft
+      : isAcuteHardshipCase
+        ? hardshipDraft
+        : params.riskLevel === "medium"
+          ? mediumRiskDraft
+          : lowRiskDraft;
 
   return {
     mode: params.riskLevel === "medium" ? "grounding_coach" : "reflective_listener",
@@ -286,7 +302,7 @@ export async function buildResponsePlanWithClaude(params: {
         null,
         2
       ),
-      maxTokens: 700,
+      maxTokens: 900,
       temperature: 0.15
     });
   } catch (error) {
@@ -296,7 +312,8 @@ export async function buildResponsePlanWithClaude(params: {
     return buildPlannerFallback({
       riskLevel: params.riskLevel,
       topicLabel: params.topicLabel,
-      userMessage: params.message
+      userMessage: params.message,
+      recentMessages: params.recentMessages
     });
   }
 
@@ -309,6 +326,7 @@ export async function buildResponsePlanWithClaude(params: {
       riskLevel: params.riskLevel,
       topicLabel: params.topicLabel,
       userMessage: params.message,
+      recentMessages: params.recentMessages
     });
   }
 
@@ -321,6 +339,7 @@ export async function buildResponsePlanWithClaude(params: {
       riskLevel: params.riskLevel,
       topicLabel: params.topicLabel,
       userMessage: params.message,
+      recentMessages: params.recentMessages
     });
   }
 

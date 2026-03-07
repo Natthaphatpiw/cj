@@ -69,8 +69,12 @@ export async function POST(request: Request) {
         }
       }
 
+      let loadingKeepAlive: ReturnType<typeof setInterval> | null = null;
       if (lineUserId && event.type === "message") {
         await tryDisplayLoadingAnimation(lineUserId, env.LINE_LOADING_SECONDS);
+        loadingKeepAlive = setInterval(() => {
+          void tryDisplayLoadingAnimation(lineUserId, env.LINE_LOADING_SECONDS);
+        }, env.LINE_LOADING_REFRESH_SECONDS * 1000);
       }
 
       const handle = async () => {
@@ -80,10 +84,16 @@ export async function POST(request: Request) {
         }
       };
 
-      if (lineUserId) {
-        await withSessionLock(lineUserId, handle);
-      } else {
-        await handle();
+      try {
+        if (lineUserId) {
+          await withSessionLock(lineUserId, handle);
+        } else {
+          await handle();
+        }
+      } finally {
+        if (loadingKeepAlive) {
+          clearInterval(loadingKeepAlive);
+        }
       }
     } catch (error) {
       logger.error("Webhook event processing failed", {
