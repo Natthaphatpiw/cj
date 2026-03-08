@@ -1,13 +1,18 @@
 import { env } from "@/lib/config";
 import {
+  cancelScheduledFollowupsForUser,
   createFollowup,
   createHandoff,
   getActiveSession,
   getFollowupById,
+  getScheduledFollowupForUser,
   getLineIdentityByUserId,
+  hasUserReplyAfter,
+  listSentFollowupTemplateKeys,
   listRecentMessages,
   listRecentSessionSummaries,
   listUserMemories,
+  markFollowupAsCancelled,
   markFollowupAsSent,
   openSession,
   recordRiskEvent,
@@ -18,6 +23,7 @@ import {
   updateSessionState,
   writeAudit
 } from "@/lib/data/repositories";
+import { hasFollowupSentMarker, setFollowupSentMarker, withFollowupSendLock } from "@/lib/data/redis";
 import { publishQStashJob } from "@/lib/data/qstash";
 import { upsertSearchDocument } from "@/lib/data/search";
 import { vectorUpsertTextRecord } from "@/lib/data/vector";
@@ -31,6 +37,7 @@ import { buildMainMenuQuickReply, buildTopicConfirmationMessage } from "@/lib/li
 import { pushMessage } from "@/lib/line/client";
 import type { LineMessage, LineWebhookEvent } from "@/lib/line/types";
 import { logger } from "@/lib/logger";
+import { pickWellbeingCheckinTemplate } from "@/lib/followup/checkin-messages";
 import { buildCrisisMessage, runSafetyPrecheck } from "@/lib/safety/precheck";
 import { runSafetyPostcheck } from "@/lib/safety/postcheck";
 import { resolveTopicBoundary } from "@/lib/topic/engine";
@@ -40,6 +47,8 @@ type OrchestratorResult = {
   shouldReply: boolean;
   handled: boolean;
 };
+
+const WELLBEING_FOLLOWUP_PURPOSE = "wellbeing_checkin";
 
 function getTextFromEvent(event: LineWebhookEvent) {
   if (event.type === "message" && event.message?.type === "text") {
@@ -210,6 +219,7 @@ export async function processLineEvent(event: LineWebhookEvent): Promise<Orchest
     lineWebhookEventId: event.webhookEventId,
     lineMessageId: event.message?.id
   });
+  await cancelScheduledFollowupsForUser(user.id, WELLBEING_FOLLOWUP_PURPOSE);
 
   const precheck = runSafetyPrecheck(userText);
   if (precheck.riskLevel === "high" || precheck.riskLevel === "imminent") {
@@ -326,18 +336,32 @@ export async function processLineEvent(event: LineWebhookEvent): Promise<Orchest
   }
 
   if (postcheck.plan.shouldScheduleFollowup) {
-    const delay = Math.max(6, postcheck.plan.followupDelayHours ?? 18);
-    const scheduledFor = new Date(Date.now() + delay * 3600000).toISOString();
-    const followupId = await createFollowup({
-      userId: user.id,
-      sessionId: targetSession.id,
-      scheduledFor,
-      purpose: "wellbeing_checkin",
-      payload: {
-        text: "เมื่อสักครู่ที่เราคุยกันไป ตอนนี้ความรู้สึกคุณเป็นยังไงบ้างครับ"
-      }
-    });
-    await enqueueFollowup(followupId, delay);
+    const existing = await getScheduledFollowupForUser(user.id, WELLBEING_FOLLOWUP_PURPOSE);
+    if (!existing) {
+      const delay = Math.max(6, postcheck.plan.followupDelayHours ?? 18);
+      const scheduledFor = new Date(Date.now() + delay * 3600000).toISOString();
+      const sentTemplateKeys = await listSentFollowupTemplateKeys(user.id, WELLBEING_FOLLOWUP_PURPOSE);
+      const template = pickWellbeingCheckinTemplate({
+        usedKeys: sentTemplateKeys,
+        lastKey: sentTemplateKeys[0]
+      });
+      const followupId = await createFollowup({
+        userId: user.id,
+        sessionId: targetSession.id,
+        scheduledFor,
+        purpose: WELLBEING_FOLLOWUP_PURPOSE,
+        payload: {
+          templateKey: template.key,
+          text: template.text
+        }
+      });
+      await enqueueFollowup(followupId, delay);
+    } else {
+      logger.info("Skipped followup scheduling because one is already pending", {
+        userId: user.id,
+        followupId: existing.id
+      });
+    }
   }
 
   await writeAudit({
@@ -414,17 +438,53 @@ export async function runSessionMaintenanceJob(params: {
 }
 
 export async function sendScheduledFollowup(followupId: string) {
-  const followup = await getFollowupById(followupId);
-  const resolveIdentity = await getLineIdentityByUserId(followup.user_id);
-  const payloadText =
-    typeof followup.payload?.text === "string"
-      ? followup.payload.text
-      : "ขอเช็กอินสั้นๆ ตอนนี้คุณโอเคขึ้นไหมครับ";
+  const lockResult = await withFollowupSendLock(followupId, async () => {
+    const followup = await getFollowupById(followupId);
+    if (followup.status !== "scheduled") {
+      logger.info("Skipped followup send because status is not scheduled", {
+        followupId,
+        status: followup.status
+      });
+      return;
+    }
 
-  await pushMessage(resolveIdentity.line_user_id, [buildMainMenuQuickReply(payloadText)]);
-  await markFollowupAsSent(followupId);
+    const hasReplyAfterCreated = await hasUserReplyAfter(followup.user_id, followup.created_at);
+    if (hasReplyAfterCreated) {
+      await markFollowupAsCancelled(followupId);
+      logger.info("Cancelled followup because user already replied", {
+        followupId
+      });
+      return;
+    }
 
-  logger.info("Followup sent", {
-    followupId
+    const alreadySent = await hasFollowupSentMarker(followupId);
+    if (alreadySent) {
+      await markFollowupAsSent(followupId);
+      logger.warn("Followup had sent marker, skipped duplicate push", {
+        followupId
+      });
+      return;
+    }
+
+    const resolveIdentity = await getLineIdentityByUserId(followup.user_id);
+    const payloadText =
+      typeof followup.payload?.text === "string"
+        ? followup.payload.text
+        : "ขอเช็กอินสั้นๆ ตอนนี้คุณโอเคขึ้นไหมครับ";
+
+    await pushMessage(resolveIdentity.line_user_id, [buildMainMenuQuickReply(payloadText)]);
+    await setFollowupSentMarker(followupId);
+    const marked = await markFollowupAsSent(followupId);
+
+    logger.info("Followup sent", {
+      followupId,
+      marked
+    });
   });
+
+  if (lockResult === null) {
+    logger.info("Skipped followup send because lock is already held", {
+      followupId
+    });
+  }
 }

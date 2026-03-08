@@ -2,6 +2,8 @@ import { Redis } from "@upstash/redis";
 import { env } from "@/lib/config";
 
 let redisClient: Redis | null = null;
+const FOLLOWUP_SEND_LOCK_TTL_SECONDS = 180;
+const FOLLOWUP_SENT_MARKER_TTL_SECONDS = 60 * 60 * 24 * 14;
 
 function getRedis() {
   if (!redisClient) {
@@ -57,4 +59,38 @@ export async function withSessionLock<T>(userId: string, handler: () => Promise<
   } finally {
     await redis.del(key);
   }
+}
+
+export async function withFollowupSendLock<T>(followupId: string, handler: () => Promise<T>) {
+  const redis = getRedis();
+  const key = `line:followup:lock:${followupId}`;
+  const lock = await redis.set(key, "1", {
+    nx: true,
+    ex: FOLLOWUP_SEND_LOCK_TTL_SECONDS
+  });
+
+  if (lock !== "OK") {
+    return null;
+  }
+
+  try {
+    return await handler();
+  } finally {
+    await redis.del(key);
+  }
+}
+
+export async function hasFollowupSentMarker(followupId: string) {
+  const redis = getRedis();
+  const key = `line:followup:sent:${followupId}`;
+  const value = await redis.get<string | null>(key);
+  return value === "1";
+}
+
+export async function setFollowupSentMarker(followupId: string) {
+  const redis = getRedis();
+  const key = `line:followup:sent:${followupId}`;
+  await redis.set(key, "1", {
+    ex: FOLLOWUP_SENT_MARKER_TTL_SECONDS
+  });
 }

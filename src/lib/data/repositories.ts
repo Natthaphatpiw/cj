@@ -52,6 +52,18 @@ export type MemoryRecord = {
   expires_at: string | null;
 };
 
+export type FollowupRecord = {
+  id: string;
+  user_id: string;
+  session_id: string;
+  scheduled_for: string;
+  purpose: string;
+  status: "scheduled" | "sent" | "failed" | "cancelled" | string;
+  payload: Record<string, unknown> | null;
+  sent_at: string | null;
+  created_at: string;
+};
+
 function assertDb<T>(value: T | null, error: { message: string } | null, context: string) {
   if (error) {
     throw new Error(`${context}: ${error.message}`);
@@ -458,17 +470,127 @@ export async function createFollowup(params: {
 }
 
 export async function markFollowupAsSent(followupId: string) {
-  const { error } = await supabaseAdmin
+  const { data, error } = await supabaseAdmin
     .from("followups")
     .update({
       status: "sent",
       sent_at: new Date().toISOString()
     })
-    .eq("id", followupId);
+    .eq("id", followupId)
+    .eq("status", "scheduled")
+    .select("id");
 
   if (error) {
     throw new Error(`markFollowupAsSent: ${error.message}`);
   }
+
+  return (data?.length ?? 0) > 0;
+}
+
+export async function markFollowupAsCancelled(followupId: string) {
+  const { data, error } = await supabaseAdmin
+    .from("followups")
+    .update({
+      status: "cancelled"
+    })
+    .eq("id", followupId)
+    .eq("status", "scheduled")
+    .select("id");
+
+  if (error) {
+    throw new Error(`markFollowupAsCancelled: ${error.message}`);
+  }
+
+  return (data?.length ?? 0) > 0;
+}
+
+export async function cancelScheduledFollowupsForUser(userId: string, purpose?: string) {
+  let query = supabaseAdmin
+    .from("followups")
+    .update({
+      status: "cancelled"
+    })
+    .eq("user_id", userId)
+    .eq("status", "scheduled");
+
+  if (purpose) {
+    query = query.eq("purpose", purpose);
+  }
+
+  const { data, error } = await query.select("id");
+  if (error) {
+    throw new Error(`cancelScheduledFollowupsForUser: ${error.message}`);
+  }
+
+  return data?.length ?? 0;
+}
+
+export async function getScheduledFollowupForUser(userId: string, purpose?: string): Promise<FollowupRecord | null> {
+  let query = supabaseAdmin
+    .from("followups")
+    .select("*")
+    .eq("user_id", userId)
+    .eq("status", "scheduled")
+    .order("scheduled_for", { ascending: true })
+    .limit(1);
+
+  if (purpose) {
+    query = query.eq("purpose", purpose);
+  }
+
+  const { data, error } = await query.maybeSingle();
+  if (error) {
+    throw new Error(`getScheduledFollowupForUser: ${error.message}`);
+  }
+
+  return (data as FollowupRecord | null) ?? null;
+}
+
+export async function hasUserReplyAfter(userId: string, sinceIso: string) {
+  const { data, error } = await supabaseAdmin
+    .from("messages")
+    .select("id")
+    .eq("user_id", userId)
+    .eq("role", "user")
+    .gt("created_at", sinceIso)
+    .limit(1);
+
+  if (error) {
+    throw new Error(`hasUserReplyAfter: ${error.message}`);
+  }
+
+  return (data?.length ?? 0) > 0;
+}
+
+export async function listSentFollowupTemplateKeys(userId: string, purpose: string, limit = 200) {
+  const { data, error } = await supabaseAdmin
+    .from("followups")
+    .select("payload")
+    .eq("user_id", userId)
+    .eq("purpose", purpose)
+    .eq("status", "sent")
+    .order("sent_at", { ascending: false })
+    .limit(limit);
+
+  if (error) {
+    throw new Error(`listSentFollowupTemplateKeys: ${error.message}`);
+  }
+
+  const keys: string[] = [];
+  for (const row of data ?? []) {
+    const payload = row.payload as Record<string, unknown> | null;
+    const key =
+      typeof payload?.templateKey === "string"
+        ? payload.templateKey
+        : typeof payload?.template_key === "string"
+          ? payload.template_key
+          : undefined;
+    if (key) {
+      keys.push(key);
+    }
+  }
+
+  return keys;
 }
 
 export async function createHandoff(params: {
@@ -576,18 +698,11 @@ export async function getLineIdentityByUserId(userId: string) {
   return data as { line_user_id: string };
 }
 
-export async function getFollowupById(followupId: string) {
+export async function getFollowupById(followupId: string): Promise<FollowupRecord> {
   const { data, error } = await supabaseAdmin.from("followups").select("*").eq("id", followupId).single();
   if (error) {
     throw new Error(`getFollowupById: ${error.message}`);
   }
 
-  return data as {
-    id: string;
-    user_id: string;
-    session_id: string;
-    status: string;
-    payload: Record<string, unknown> | null;
-    purpose: string;
-  };
+  return data as FollowupRecord;
 }
