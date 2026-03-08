@@ -41,7 +41,7 @@ function normalizeConversationalStyle(text: string) {
   }
 
   if (normalized.length === 0) {
-    normalized = "ขอบคุณที่เล่าให้ฟังนะ ผมอยู่ตรงนี้กับคุณ";
+    normalized = "ผมอยู่ตรงนี้กับคุณนะ ถ้าพร้อมเมื่อไหร่เราค่อยๆ คุยกันได้";
   }
 
   return normalized;
@@ -50,7 +50,7 @@ function normalizeConversationalStyle(text: string) {
 function sanitizeText(text: string) {
   let sanitized = text.trim();
   if (sanitized.length === 0) {
-    sanitized = "ขอบคุณที่แชร์นะ ผมอยู่ตรงนี้เพื่อช่วยคุณค่อยๆ ไปทีละขั้นครับ";
+    sanitized = "ผมอยู่ตรงนี้เพื่อช่วยคุณค่อยๆ ไปทีละขั้นนะครับ";
   }
 
   sanitized = sanitized.replaceAll("I am your therapist", "I am a support assistant");

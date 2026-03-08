@@ -27,6 +27,7 @@ import { hasFollowupSentMarker, setFollowupSentMarker, withFollowupSendLock } fr
 import { publishQStashJob } from "@/lib/data/qstash";
 import { upsertSearchDocument } from "@/lib/data/search";
 import { vectorUpsertTextRecord } from "@/lib/data/vector";
+import { classifyIncomingUserText } from "@/lib/classifier/openai";
 import {
   buildResponsePlanWithClaude,
   resolveTopicWithClaude,
@@ -83,6 +84,49 @@ function userAsksImmediateAction(message: string) {
 
 function hasAcuteHardshipSignals(text: string) {
   return /รถชน|อุบัติเหตุ|ขาหัก|ไม่มีรายได้|นมผง|ลูกเล็ก|ทารก|หนี้|financial|debt/i.test(text);
+}
+
+function isMoodCheckTrigger(message: string) {
+  return /เช็กอารมณ์วันนี้|เช็คอารมณ์วันนี้|mood\s*check|check[\s-]*in/i.test(message);
+}
+
+function isLowDisclosureMessage(message: string) {
+  const trimmed = message.trim();
+  if (!trimmed) {
+    return true;
+  }
+
+  if (isMoodCheckTrigger(trimmed)) {
+    return true;
+  }
+
+  const normalized = trimmed.toLowerCase();
+  const tokens = normalized.split(/\s+/).filter(Boolean);
+  const hasDisclosureSignals =
+    /รู้สึก|เครียด|กังวล|ไม่ไหว|นอนไม่หลับ|เสียใจ|กลัว|โกรธ|ร้องไห้|โดน|เจ็บ|เหนื่อย|สับสน|stress|anxious|panic|depressed|sad/i.test(
+      normalized
+    );
+
+  if (!hasDisclosureSignals && (tokens.length <= 7 || normalized.length <= 32)) {
+    return true;
+  }
+
+  return false;
+}
+
+function hasPrematureValidationOpener(message: string) {
+  const text = message.trim();
+  return /^(ขอบคุณที่เล่าให้ฟัง|ขอบคุณที่ไว้ใจเล่า|ขอบคุณที่แชร์|เรื่องที่คุณกำลังเจอ|ดีใจที่คุณเล่า|ผมได้ยินแล้ว)/i.test(
+    text
+  );
+}
+
+function buildLowDisclosureSafeReply(userMessage: string) {
+  if (isMoodCheckTrigger(userMessage)) {
+    return "ได้เลย เราเช็กอารมณ์แบบสั้นๆ ตอนนี้กันนะ ตอนนี้อารมณ์ใกล้ข้อไหนที่สุด สงบ / กังวล / เครียด / เหนื่อย แล้วผมจะช่วยต่อให้ตรงกับที่คุณเป็นอยู่";
+  }
+
+  return "ผมอยู่ตรงนี้กับคุณนะ ถ้ายังไม่พร้อมเล่ายาวๆ พิมพ์สั้นๆ ได้เลย เช่น ตอนนี้เครียด เหนื่อย หรือสับสน เดี๋ยวผมช่วยค่อยๆ ต่อบทสนทนาให้";
 }
 
 function isRepetitiveSupportReply(candidate: string, recentMessages: Array<{ role: string; content_text: string }>) {
@@ -176,6 +220,74 @@ export async function processLineEvent(event: LineWebhookEvent): Promise<Orchest
   const lineUserId = event.source.userId;
   const user = await resolveUserByLineId(lineUserId);
   const activeSession = await getActiveSession(user.id);
+
+  const inputClassification = await classifyIncomingUserText(userText);
+  const shouldRouteToHumanOnly =
+    inputClassification.route === "general_other" &&
+    inputClassification.confidence >= env.NON_CONSULT_CLASSIFIER_MIN_CONFIDENCE;
+
+  if (shouldRouteToHumanOnly) {
+    const targetSession =
+      activeSession && activeSession.topic_label === "general_operator_handoff"
+        ? activeSession
+        : await openSession({
+            userId: user.id,
+            topicLabel: "general_operator_handoff",
+            linkedPriorSessionId: activeSession?.id
+          });
+
+    await saveMessage({
+      userId: user.id,
+      sessionId: targetSession.id,
+      role: "user",
+      contentType: "text",
+      contentText: userText,
+      lineWebhookEventId: event.webhookEventId,
+      lineMessageId: event.message?.id
+    });
+    await cancelScheduledFollowupsForUser(user.id, WELLBEING_FOLLOWUP_PURPOSE);
+
+    await writeAudit({
+      actorType: "system",
+      action: "non_consultation_routed_to_human",
+      entityType: "session",
+      entityId: targetSession.id,
+      metadata: {
+        route: inputClassification.route,
+        confidence: inputClassification.confidence,
+        reason: inputClassification.reason,
+        source: inputClassification.source
+      }
+    });
+
+    if (env.NON_CONSULT_AUTO_ACK) {
+      await saveMessage({
+        userId: user.id,
+        sessionId: targetSession.id,
+        role: "assistant",
+        contentType: "text",
+        contentText: env.NON_CONSULT_ACK_MESSAGE
+      });
+
+      return {
+        shouldReply: true,
+        handled: true,
+        replyMessages: [
+          {
+            type: "text",
+            text: env.NON_CONSULT_ACK_MESSAGE
+          }
+        ]
+      };
+    }
+
+    return {
+      shouldReply: false,
+      handled: true,
+      replyMessages: []
+    };
+  }
+
   const recentSummaries = await listRecentSessionSummaries(user.id, 5);
 
   const topicDecision = await resolveTopicBoundary({
@@ -296,6 +408,9 @@ export async function processLineEvent(event: LineWebhookEvent): Promise<Orchest
     isRepetitiveSupportReply(outgoingText, recentMessages)
   ) {
     outgoingText = hardshipImmediatePlanReply();
+  }
+  if (isLowDisclosureMessage(userText) && hasPrematureValidationOpener(outgoingText)) {
+    outgoingText = buildLowDisclosureSafeReply(userText);
   }
 
   await saveMessage({

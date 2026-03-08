@@ -69,6 +69,16 @@ const serverSchema = z.object({
   ANTHROPIC_ENABLE_EXTENDED_THINKING: trueFalse.default(true),
   ANTHROPIC_THINKING_EFFORT: z.enum(["low", "medium", "high"]).default("medium"),
   ANTHROPIC_CONTEXT_WINDOW_BETA: optionalString,
+  OPENAI_API_KEY: optionalString,
+  OPENAI_API_BASE_URL: z.string().url().default("https://api.openai.com/v1"),
+  OPENAI_CLASSIFIER_MODEL: z.string().default("gpt-4.1-mini"),
+  OPENAI_CLASSIFIER_TIMEOUT_MS: z.coerce.number().int().min(800).max(10000).default(2500),
+  ENABLE_NON_CONSULT_CLASSIFIER: trueFalse.default(true),
+  NON_CONSULT_CLASSIFIER_MIN_CONFIDENCE: z.coerce.number().min(0).max(1).default(0.82),
+  NON_CONSULT_AUTO_ACK: trueFalse.default(false),
+  NON_CONSULT_ACK_MESSAGE: z
+    .string()
+    .default("ขอบคุณที่ทักมานะครับ ข้อความนี้จะให้ทีมงานตอบต่อให้โดยตรงครับ"),
   UPSTASH_REDIS_REST_URL: nonEmpty,
   UPSTASH_REDIS_REST_TOKEN: nonEmpty,
   WEBHOOK_DEDUP_TTL_SECONDS: z.coerce.number().int().positive().default(86400),

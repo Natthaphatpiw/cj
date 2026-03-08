@@ -52,6 +52,25 @@ function parseStructuredJson<T>(rawText: string): T | null {
   return safeJsonParse<T>(maybeJson);
 }
 
+function isLowDisclosureInput(message: string) {
+  const trimmed = message.trim();
+  if (!trimmed) {
+    return true;
+  }
+
+  const normalized = trimmed.toLowerCase();
+  if (/เช็กอารมณ์วันนี้|เช็คอารมณ์วันนี้|mood\s*check|check[\s-]*in/.test(normalized)) {
+    return true;
+  }
+
+  const hasDisclosureSignals =
+    /รู้สึก|เครียด|กังวล|นอนไม่หลับ|ไม่ไหว|กลัว|เสียใจ|โกรธ|เหนื่อย|สับสน|stress|anxious|panic|sad|depressed/.test(
+      normalized
+    );
+  const tokenCount = normalized.split(/\s+/).filter(Boolean).length;
+  return !hasDisclosureSignals && (tokenCount <= 7 || normalized.length <= 32);
+}
+
 function buildPlannerFallback(params: {
   riskLevel: "low" | "medium" | "high" | "imminent";
   topicLabel: string;
@@ -73,8 +92,13 @@ function buildPlannerFallback(params: {
     /ทำยังไง|ควรทำไง|ควรทำอย่างไร|ต้องทำอะไร|เริ่มจากอะไร|ทางออก|ช่วยหน่อย|help/i.test(
       normalizedInput
     );
+  const isLowDisclosure = isLowDisclosureInput(params.userMessage);
   const lowRiskDraft =
-    "ขอบคุณที่เล่าให้ฟังนะ เรื่องนี้กดดันใจมากจริงๆ เราไม่ต้องรีบแก้ทุกอย่างในครั้งเดียว ตอนนี้อยากให้เราเริ่มแบบไหนดี ระบายต่ออีกหน่อย / ช่วยเรียงความคิดในหัว / พักหายใจช้าๆ 1 นาที";
+    isLowDisclosure
+      ? /เช็กอารมณ์วันนี้|เช็คอารมณ์วันนี้|mood\s*check|check[\s-]*in/i.test(params.userMessage)
+        ? "ได้เลย เราเช็กอารมณ์แบบสั้นๆ ตอนนี้กันนะ ตอนนี้อารมณ์ใกล้ข้อไหนที่สุด สงบ / กังวล / เครียด / เหนื่อย แล้วผมจะช่วยต่อให้ตรงกับที่คุณเป็นอยู่"
+        : "ผมอยู่ตรงนี้กับคุณนะ ถ้ายังไม่พร้อมเล่ายาวๆ พิมพ์สั้นๆ ได้เลย เช่น ตอนนี้เครียด เหนื่อย หรือสับสน เดี๋ยวผมช่วยค่อยๆ ต่อบทสนทนาให้"
+      : "ขอบคุณที่เล่าให้ฟังนะ เรื่องนี้กดดันใจมากจริงๆ เราไม่ต้องรีบแก้ทุกอย่างในครั้งเดียว ตอนนี้อยากให้เราเริ่มแบบไหนดี ระบายต่ออีกหน่อย / ช่วยเรียงความคิดในหัว / พักหายใจช้าๆ 1 นาที";
   const mediumRiskDraft =
     "ขอบคุณที่ไว้ใจเล่าให้ฟังนะ ตอนนี้ความเครียดค่อนข้างหนักกับใจ เราจะค่อยๆ จัดการทีละจุดแบบไม่กดดันเกินไป ตอนนี้อยากให้ช่วยแบบไหนดี ระบายสิ่งที่หนักสุดก่อน / ช่วยจัดลำดับเรื่องที่ค้างในหัว / พักใจสั้นๆ ก่อน";
   const hardshipDraft =
