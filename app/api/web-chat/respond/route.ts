@@ -89,6 +89,7 @@ export async function POST(request: Request) {
   const result = await processLineEvent(event, {
     disableFollowupScheduling: true,
     disableSessionMaintenance: true,
+    channel: "web_widget",
     profileSnapshot: {
       language: parsed.data.locale
     }

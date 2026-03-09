@@ -5,11 +5,17 @@ import {
   createHandoff,
   getActiveSession,
   getFollowupById,
+  getUserById,
   getScheduledFollowupForUser,
   getLineIdentityByUserId,
+  hasOpenCriticalRiskEvent,
+  hasSentFollowupSince,
   hasUserReplyAfter,
+  listLineIdentityUsers,
   listSentFollowupTemplateKeys,
+  listSentFollowupTexts,
   listRecentMessages,
+  listRecentUserMessages,
   listRecentSessionSummaries,
   listUserMemories,
   markFollowupAsCancelled,
@@ -20,6 +26,8 @@ import {
   saveMessage,
   saveSessionSummary,
   saveUserMemory,
+  trackProductEvent,
+  upsertUserEngagementProfile,
   updateSessionState,
   writeAudit
 } from "@/lib/data/repositories";
@@ -39,6 +47,8 @@ import { pushMessage } from "@/lib/line/client";
 import type { LineMessage, LineWebhookEvent } from "@/lib/line/types";
 import { logger } from "@/lib/logger";
 import { pickWellbeingCheckinTemplate } from "@/lib/followup/checkin-messages";
+import { generateDailyOpenCheckinMessage } from "@/lib/followup/daily-checkin";
+import { buildStructuredModuleReply, detectStructuredModuleIntent } from "@/lib/modules/structured-modules";
 import { buildCrisisMessage, runSafetyPrecheck } from "@/lib/safety/precheck";
 import { runSafetyPostcheck } from "@/lib/safety/postcheck";
 import { resolveTopicBoundary } from "@/lib/topic/engine";
@@ -52,6 +62,7 @@ type OrchestratorResult = {
 type ProcessLineEventOptions = {
   disableFollowupScheduling?: boolean;
   disableSessionMaintenance?: boolean;
+  channel?: "line_oa" | "web_widget" | "system";
   profileSnapshot?: {
     displayName?: string;
     pictureUrl?: string;
@@ -60,6 +71,24 @@ type ProcessLineEventOptions = {
 };
 
 const WELLBEING_FOLLOWUP_PURPOSE = "wellbeing_checkin";
+const DAILY_OPEN_CHECKIN_PURPOSE = "daily_open_checkin";
+
+async function safeTrackProductEvent(params: {
+  userId?: string;
+  sessionId?: string;
+  channel: "line_oa" | "web_widget" | "system";
+  eventName: string;
+  properties?: Record<string, unknown>;
+}) {
+  try {
+    await trackProductEvent(params);
+  } catch (error) {
+    logger.warn("trackProductEvent failed", {
+      eventName: params.eventName,
+      error: error instanceof Error ? error.message : "unknown_error"
+    });
+  }
+}
 
 function getTextFromEvent(event: LineWebhookEvent) {
   if (event.type === "message" && event.message?.type === "text") {
@@ -232,6 +261,8 @@ export async function processLineEvent(
 
   const lineUserId = event.source.userId;
   const user = await resolveUserByLineId(lineUserId, options?.profileSnapshot);
+  const channel: "line_oa" | "web_widget" | "system" =
+    options?.channel ?? (event.webhookEventId?.startsWith("web-") ? "web_widget" : "line_oa");
   const activeSession = await getActiveSession(user.id);
 
   const inputClassification = await classifyIncomingUserText(userText);
@@ -382,10 +413,75 @@ export async function processLineEvent(
       safetyLabel: precheck.riskLevel
     });
 
+    await safeTrackProductEvent({
+      userId: user.id,
+      sessionId: targetSession.id,
+      channel,
+      eventName: "crisis_protocol_triggered",
+      properties: {
+        riskLevel: precheck.riskLevel,
+        reasonCodes: precheck.reasonCodes
+      }
+    });
+
     return {
       shouldReply: true,
       handled: true,
       replyMessages: crisisMessages
+    };
+  }
+
+  const structuredModule = detectStructuredModuleIntent(userText);
+  if (structuredModule && (precheck.riskLevel === "low" || precheck.riskLevel === "medium")) {
+    const moduleReply = buildStructuredModuleReply({
+      moduleKey: structuredModule.key,
+      locale: user.language
+    });
+
+    await saveMessage({
+      userId: user.id,
+      sessionId: targetSession.id,
+      role: "assistant",
+      contentType: "text",
+      contentText: moduleReply,
+      safetyLabel: precheck.riskLevel
+    });
+
+    await writeAudit({
+      actorType: "system",
+      action: "structured_module_served",
+      entityType: "session",
+      entityId: targetSession.id,
+      metadata: {
+        moduleKey: structuredModule.key,
+        confidence: structuredModule.confidence
+      }
+    });
+
+    await safeTrackProductEvent({
+      userId: user.id,
+      sessionId: targetSession.id,
+      channel,
+      eventName: "structured_module_served",
+      properties: {
+        moduleKey: structuredModule.key,
+        confidence: structuredModule.confidence
+      }
+    });
+
+    if (!options?.disableSessionMaintenance) {
+      await enqueueSessionMaintenance({
+        userId: user.id,
+        sessionId: targetSession.id,
+        topicLabel: targetSession.topic_label
+      });
+    }
+
+    const response = buildMainMenuQuickReply(moduleReply);
+    return {
+      shouldReply: true,
+      handled: true,
+      replyMessages: [response]
     };
   }
 
@@ -484,6 +580,17 @@ export async function processLineEvent(
         }
       });
       await enqueueFollowup(followupId, delay);
+      await safeTrackProductEvent({
+        userId: user.id,
+        sessionId: targetSession.id,
+        channel,
+        eventName: "wellbeing_followup_scheduled",
+        properties: {
+          followupId,
+          delayHours: delay,
+          purpose: WELLBEING_FOLLOWUP_PURPOSE
+        }
+      });
     } else {
       logger.info("Skipped followup scheduling because one is already pending", {
         userId: user.id,
@@ -500,6 +607,17 @@ export async function processLineEvent(
     metadata: {
       topicDecision,
       riskLevel: postcheck.plan.riskLevel
+    }
+  });
+
+  await safeTrackProductEvent({
+    userId: user.id,
+    sessionId: targetSession.id,
+    channel,
+    eventName: "chat_turn_completed",
+    properties: {
+      riskLevel: postcheck.plan.riskLevel,
+      topicLabel: targetSession.topic_label
     }
   });
 
@@ -567,6 +685,142 @@ export async function runSessionMaintenanceJob(params: {
   });
 }
 
+export async function runDailyOpenCheckinJob(params?: { limit?: number }) {
+  if (!env.ENABLE_DAILY_OPEN_CHECKIN || !env.ENABLE_PUSH_FOLLOWUPS) {
+    return {
+      enabled: false,
+      evaluated: 0,
+      sent: 0,
+      skipped_recent_activity: 0,
+      skipped_gap_window: 0,
+      skipped_pending: 0,
+      skipped_risk: 0,
+      errors: 0
+    };
+  }
+
+  const limit = Math.min(params?.limit ?? env.DAILY_CHECKIN_MAX_USERS_PER_RUN, env.DAILY_CHECKIN_MAX_USERS_PER_RUN);
+  const identities = await listLineIdentityUsers(limit);
+  const inactivitySinceIso = new Date(Date.now() - env.DAILY_CHECKIN_MIN_INACTIVITY_HOURS * 3600000).toISOString();
+  const gapSinceIso = new Date(Date.now() - env.DAILY_CHECKIN_MIN_GAP_HOURS * 3600000).toISOString();
+  const nowIso = new Date().toISOString();
+
+  const counters = {
+    enabled: true,
+    evaluated: 0,
+    sent: 0,
+    skipped_recent_activity: 0,
+    skipped_gap_window: 0,
+    skipped_pending: 0,
+    skipped_risk: 0,
+    errors: 0
+  };
+
+  for (const identity of identities) {
+    counters.evaluated += 1;
+
+    try {
+      const user = await getUserById(identity.user_id);
+      const hasCriticalRisk = await hasOpenCriticalRiskEvent(user.id);
+      if (hasCriticalRisk) {
+        counters.skipped_risk += 1;
+        continue;
+      }
+
+      const hasRecentActivity = await hasUserReplyAfter(user.id, inactivitySinceIso);
+      if (hasRecentActivity) {
+        counters.skipped_recent_activity += 1;
+        continue;
+      }
+
+      const sentRecently = await hasSentFollowupSince(user.id, DAILY_OPEN_CHECKIN_PURPOSE, gapSinceIso);
+      if (sentRecently) {
+        counters.skipped_gap_window += 1;
+        continue;
+      }
+
+      const pendingFollowup = await getScheduledFollowupForUser(user.id, DAILY_OPEN_CHECKIN_PURPOSE);
+      if (pendingFollowup) {
+        counters.skipped_pending += 1;
+        continue;
+      }
+
+      const activeSession = await getActiveSession(user.id);
+      if (activeSession?.status === "crisis_locked") {
+        counters.skipped_risk += 1;
+        continue;
+      }
+
+      const targetSession =
+        activeSession ??
+        (await openSession({
+          userId: user.id,
+          topicLabel: "daily_checkin"
+        }));
+
+      const recentMessages = await listRecentUserMessages(user.id, 8);
+      const recentUserMessages = recentMessages
+        .filter((message) => message.role === "user")
+        .map((message) => message.content_text)
+        .slice(-6);
+      const recentSentCheckins = await listSentFollowupTexts(user.id, DAILY_OPEN_CHECKIN_PURPOSE, 12);
+
+      const generated = await generateDailyOpenCheckinMessage({
+        locale: user.language,
+        recentUserMessages,
+        recentSentCheckins
+      });
+
+      const followupId = await createFollowup({
+        userId: user.id,
+        sessionId: targetSession.id,
+        scheduledFor: nowIso,
+        purpose: DAILY_OPEN_CHECKIN_PURPOSE,
+        payload: {
+          text: generated.text,
+          source: generated.source,
+          strategy: "open_question_personalized"
+        }
+      });
+
+      await sendScheduledFollowup(followupId);
+      try {
+        await upsertUserEngagementProfile({
+          userId: user.id,
+          checkinFrequency: "adaptive",
+          lastDailyCheckinAt: nowIso
+        });
+      } catch (error) {
+        logger.warn("upsertUserEngagementProfile failed", {
+          userId: user.id,
+          error: error instanceof Error ? error.message : "unknown_error"
+        });
+      }
+
+      await safeTrackProductEvent({
+        userId: user.id,
+        sessionId: targetSession.id,
+        channel: "system",
+        eventName: "daily_open_checkin_sent",
+        properties: {
+          followupId,
+          source: generated.source
+        }
+      });
+
+      counters.sent += 1;
+    } catch (error) {
+      counters.errors += 1;
+      logger.warn("runDailyOpenCheckinJob candidate failed", {
+        userId: identity.user_id,
+        error: error instanceof Error ? error.message : "unknown_error"
+      });
+    }
+  }
+
+  return counters;
+}
+
 export async function sendScheduledFollowup(followupId: string) {
   const lockResult = await withFollowupSendLock(followupId, async () => {
     const followup = await getFollowupById(followupId);
@@ -605,6 +859,18 @@ export async function sendScheduledFollowup(followupId: string) {
     await pushMessage(resolveIdentity.line_user_id, [buildMainMenuQuickReply(payloadText)]);
     await setFollowupSentMarker(followupId);
     const marked = await markFollowupAsSent(followupId);
+
+    await safeTrackProductEvent({
+      userId: followup.user_id,
+      sessionId: followup.session_id,
+      channel: "line_oa",
+      eventName: "followup_sent",
+      properties: {
+        followupId,
+        purpose: followup.purpose,
+        marked
+      }
+    });
 
     logger.info("Followup sent", {
       followupId,

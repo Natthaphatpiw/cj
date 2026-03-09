@@ -64,6 +64,13 @@ export type FollowupRecord = {
   created_at: string;
 };
 
+export type LineIdentityRecord = {
+  user_id: string;
+  line_user_id: string;
+};
+
+export type ProductChannel = "line_oa" | "web_widget" | "system";
+
 function assertDb<T>(value: T | null, error: { message: string } | null, context: string) {
   if (error) {
     throw new Error(`${context}: ${error.message}`);
@@ -167,6 +174,11 @@ export async function resolveUserByLineId(
 
   await ensureConversation(user.id);
   return user;
+}
+
+export async function getUserById(userId: string): Promise<UserRecord> {
+  const { data, error } = await supabaseAdmin.from("users").select("*").eq("id", userId).single();
+  return assertDb<UserRecord>(data as UserRecord | null, error, "getUserById");
 }
 
 export async function ensureConversation(userId: string) {
@@ -593,6 +605,32 @@ export async function listSentFollowupTemplateKeys(userId: string, purpose: stri
   return keys;
 }
 
+export async function listSentFollowupTexts(userId: string, purpose: string, limit = 50) {
+  const { data, error } = await supabaseAdmin
+    .from("followups")
+    .select("payload")
+    .eq("user_id", userId)
+    .eq("purpose", purpose)
+    .eq("status", "sent")
+    .order("sent_at", { ascending: false })
+    .limit(limit);
+
+  if (error) {
+    throw new Error(`listSentFollowupTexts: ${error.message}`);
+  }
+
+  const texts: string[] = [];
+  for (const row of data ?? []) {
+    const payload = row.payload as Record<string, unknown> | null;
+    const text = typeof payload?.text === "string" ? payload.text.trim() : "";
+    if (text) {
+      texts.push(text);
+    }
+  }
+
+  return texts;
+}
+
 export async function createHandoff(params: {
   userId: string;
   sessionId: string;
@@ -705,4 +743,131 @@ export async function getFollowupById(followupId: string): Promise<FollowupRecor
   }
 
   return data as FollowupRecord;
+}
+
+export async function listLineIdentityUsers(limit = 300): Promise<LineIdentityRecord[]> {
+  const { data, error } = await supabaseAdmin
+    .from("line_identities")
+    .select("user_id, line_user_id")
+    .order("last_seen_at", { ascending: false })
+    .limit(limit);
+
+  if (error) {
+    throw new Error(`listLineIdentityUsers: ${error.message}`);
+  }
+
+  return (data as LineIdentityRecord[] | null) ?? [];
+}
+
+export async function listRecentUserMessages(userId: string, limit = 8): Promise<MessageRecord[]> {
+  const { data, error } = await supabaseAdmin
+    .from("messages")
+    .select("*")
+    .eq("user_id", userId)
+    .order("created_at", { ascending: false })
+    .limit(limit);
+
+  if (error) {
+    throw new Error(`listRecentUserMessages: ${error.message}`);
+  }
+
+  return ((data as MessageRecord[] | null) ?? []).reverse();
+}
+
+export async function hasSentFollowupSince(userId: string, purpose: string, sinceIso: string) {
+  const { data, error } = await supabaseAdmin
+    .from("followups")
+    .select("id")
+    .eq("user_id", userId)
+    .eq("purpose", purpose)
+    .eq("status", "sent")
+    .gt("sent_at", sinceIso)
+    .limit(1);
+
+  if (error) {
+    throw new Error(`hasSentFollowupSince: ${error.message}`);
+  }
+
+  return (data?.length ?? 0) > 0;
+}
+
+export async function hasOpenCriticalRiskEvent(userId: string) {
+  const { data, error } = await supabaseAdmin
+    .from("risk_events")
+    .select("id")
+    .eq("user_id", userId)
+    .in("status", ["open", "in_progress"])
+    .in("risk_level", ["high", "imminent"])
+    .limit(1);
+
+  if (error) {
+    throw new Error(`hasOpenCriticalRiskEvent: ${error.message}`);
+  }
+
+  return (data?.length ?? 0) > 0;
+}
+
+export async function upsertUserEngagementProfile(params: {
+  userId: string;
+  preferredModules?: string[];
+  preferredCheckinHour?: number;
+  checkinFrequency?: "off" | "adaptive" | "daily" | "twice_weekly";
+  checkinOptOut?: boolean;
+  lastDailyCheckinAt?: string;
+  trustScore?: number;
+  engagementScore?: number;
+}) {
+  const payload: Record<string, unknown> = {
+    user_id: params.userId
+  };
+
+  if (params.preferredModules) {
+    payload.preferred_modules = params.preferredModules;
+  }
+  if (typeof params.preferredCheckinHour === "number") {
+    payload.preferred_checkin_hour = params.preferredCheckinHour;
+  }
+  if (params.checkinFrequency) {
+    payload.checkin_frequency = params.checkinFrequency;
+  }
+  if (typeof params.checkinOptOut === "boolean") {
+    payload.checkin_opt_out = params.checkinOptOut;
+  }
+  if (params.lastDailyCheckinAt) {
+    payload.last_daily_checkin_at = params.lastDailyCheckinAt;
+  }
+  if (typeof params.trustScore === "number") {
+    payload.trust_score = params.trustScore;
+  }
+  if (typeof params.engagementScore === "number") {
+    payload.engagement_score = params.engagementScore;
+  }
+
+  const { error } = await supabaseAdmin.from("user_engagement_profiles").upsert(payload, {
+    onConflict: "user_id"
+  });
+
+  if (error) {
+    throw new Error(`upsertUserEngagementProfile: ${error.message}`);
+  }
+}
+
+export async function trackProductEvent(params: {
+  userId?: string;
+  sessionId?: string;
+  channel: ProductChannel;
+  eventName: string;
+  properties?: Record<string, unknown>;
+}) {
+  const { error } = await supabaseAdmin.from("product_events").insert({
+    user_id: params.userId ?? null,
+    session_id: params.sessionId ?? null,
+    channel: params.channel,
+    event_name: params.eventName,
+    properties: params.properties ?? {}
+  });
+
+  if (error) {
+    throw new Error(`trackProductEvent: ${error.message}`);
+  }
 }

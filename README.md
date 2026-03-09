@@ -23,7 +23,6 @@ Use free tiers where possible:
 8. Optional free tools: Sentry, PostHog, Cloudflare Turnstile
 
 Anthropic Claude API is required and paid.
-grbjj
 ## Local setup
 
 1. Install dependencies
@@ -57,6 +56,8 @@ npm run dev
 - `POST /api/line/push` (internal)
 - `POST /api/chat/respond` (internal test harness)
 - `POST /api/internal/followup` (QStash/internal jobs)
+- `POST /api/web-chat/respond` (web widget chat trial)
+- `POST /api/web-chat/session` (web widget trial gate)
 - `GET /api/admin/cases` (internal)
 - `GET/PATCH /api/admin/cases/:id` (internal)
 - `GET /api/auth/line/start` (optional)
@@ -65,10 +66,17 @@ npm run dev
 
 Internal routes require header: `x-internal-secret: <INTERNAL_API_SECRET>`.
 
+`/api/internal/followup` supports job payload types:
+
+- `followup_send`
+- `session_maintenance`
+- `daily_open_checkin_run`
+
 ## Deploy checklist
 
 1. Set LINE webhook URL to `/api/line/webhook`.
 2. Add all environment variables from `.env.example`.
 3. Set QStash callback target to `/api/internal/followup`.
-4. Confirm LINE reply + push permissions.
-5. Run load and crisis-path tests before launch.
+4. (Optional) Configure a daily 18:00 job to POST `{"type":"daily_open_checkin_run"}` to `/api/internal/followup`.
+5. Confirm LINE reply + push permissions.
+6. Run load and crisis-path tests before launch.

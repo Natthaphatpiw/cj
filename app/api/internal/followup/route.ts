@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { env } from "@/lib/config";
-import { runSessionMaintenanceJob, sendScheduledFollowup } from "@/lib/chat/orchestrator";
+import { runDailyOpenCheckinJob, runSessionMaintenanceJob, sendScheduledFollowup } from "@/lib/chat/orchestrator";
 import { verifyQStashSignature } from "@/lib/data/qstash";
 import { logger } from "@/lib/logger";
 import { safeJsonParse } from "@/lib/utils/json";
@@ -18,6 +18,10 @@ const payloadSchema = z.discriminatedUnion("type", [
     userId: z.string().uuid(),
     sessionId: z.string().uuid(),
     topicLabel: z.string().min(1)
+  }),
+  z.object({
+    type: z.literal("daily_open_checkin_run"),
+    limit: z.number().int().positive().max(5000).optional()
   })
 ]);
 
@@ -62,6 +66,17 @@ export async function POST(request: Request) {
   if (parsed.data.type === "followup_send") {
     await sendScheduledFollowup(parsed.data.followupId);
     return NextResponse.json({ ok: true, type: parsed.data.type });
+  }
+
+  if (parsed.data.type === "daily_open_checkin_run") {
+    const result = await runDailyOpenCheckinJob({
+      limit: parsed.data.limit
+    });
+    return NextResponse.json({
+      ok: true,
+      type: parsed.data.type,
+      result
+    });
   }
 
   await runSessionMaintenanceJob({
