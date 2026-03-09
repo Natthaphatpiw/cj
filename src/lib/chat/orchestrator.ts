@@ -49,6 +49,16 @@ type OrchestratorResult = {
   handled: boolean;
 };
 
+type ProcessLineEventOptions = {
+  disableFollowupScheduling?: boolean;
+  disableSessionMaintenance?: boolean;
+  profileSnapshot?: {
+    displayName?: string;
+    pictureUrl?: string;
+    language?: string;
+  };
+};
+
 const WELLBEING_FOLLOWUP_PURPOSE = "wellbeing_checkin";
 
 function getTextFromEvent(event: LineWebhookEvent) {
@@ -196,7 +206,10 @@ async function enqueueSessionMaintenance(params: {
   });
 }
 
-export async function processLineEvent(event: LineWebhookEvent): Promise<OrchestratorResult> {
+export async function processLineEvent(
+  event: LineWebhookEvent,
+  options?: ProcessLineEventOptions
+): Promise<OrchestratorResult> {
   if (event.source.type !== "user" || !event.source.userId) {
     return {
       shouldReply: false,
@@ -218,7 +231,7 @@ export async function processLineEvent(event: LineWebhookEvent): Promise<Orchest
   }
 
   const lineUserId = event.source.userId;
-  const user = await resolveUserByLineId(lineUserId);
+  const user = await resolveUserByLineId(lineUserId, options?.profileSnapshot);
   const activeSession = await getActiveSession(user.id);
 
   const inputClassification = await classifyIncomingUserText(userText);
@@ -450,7 +463,7 @@ export async function processLineEvent(event: LineWebhookEvent): Promise<Orchest
     });
   }
 
-  if (postcheck.plan.shouldScheduleFollowup) {
+  if (!options?.disableFollowupScheduling && postcheck.plan.shouldScheduleFollowup) {
     const existing = await getScheduledFollowupForUser(user.id, WELLBEING_FOLLOWUP_PURPOSE);
     if (!existing) {
       const delay = Math.max(6, postcheck.plan.followupDelayHours ?? 18);
@@ -490,11 +503,13 @@ export async function processLineEvent(event: LineWebhookEvent): Promise<Orchest
     }
   });
 
-  await enqueueSessionMaintenance({
-    userId: user.id,
-    sessionId: targetSession.id,
-    topicLabel: targetSession.topic_label
-  });
+  if (!options?.disableSessionMaintenance) {
+    await enqueueSessionMaintenance({
+      userId: user.id,
+      sessionId: targetSession.id,
+      topicLabel: targetSession.topic_label
+    });
+  }
 
   const response = buildMainMenuQuickReply(outgoingText);
   return {

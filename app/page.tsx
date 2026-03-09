@@ -2,6 +2,7 @@
 
 import Image from "next/image";
 import { startTransition, useDeferredValue, useEffect, useRef, useState } from "react";
+import WebChatWidget from "@/components/web-chat-widget";
 
 type Locale = "th" | "en";
 
@@ -636,6 +637,8 @@ export default function HomePage() {
           <p>{t.footer.contact}</p>
         </div>
       </footer>
+
+      <WebChatWidget locale={deferredLocale} lineOaUrl={lineOaUrl} />
     </main>
   );
 }
