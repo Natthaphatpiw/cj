@@ -37,14 +37,16 @@ import { upsertSearchDocument } from "@/lib/data/search";
 import { vectorUpsertTextRecord } from "@/lib/data/vector";
 import { classifyIncomingUserText } from "@/lib/classifier/openai";
 import {
-  buildResponsePlanWithClaude,
-  resolveTopicWithClaude,
-  summarizeSessionWithClaude
-} from "@/lib/llm/anthropic";
+  buildResponsePlanWithGrok,
+  GrokPipelineError,
+  resolveTopicWithGrok,
+  summarizeSessionWithGrok
+} from "@/lib/llm/grok";
 import { evaluateMemoryWrite } from "@/lib/memory/gate";
 import { buildMainMenuQuickReply, buildTopicConfirmationMessage } from "@/lib/line/messages";
 import { pushMessage } from "@/lib/line/client";
 import type { LineMessage, LineWebhookEvent } from "@/lib/line/types";
+import type { ResponsePlan, TopicDecision } from "@/lib/domain/types";
 import { logger } from "@/lib/logger";
 import { pickWellbeingCheckinTemplate } from "@/lib/followup/checkin-messages";
 import { generateDailyOpenCheckinMessage } from "@/lib/followup/daily-checkin";
@@ -117,14 +119,6 @@ function crisisLabelFromRisk(risk: "high" | "imminent") {
   return risk === "imminent" ? "imminent_crisis_detected" : "high_risk_detected";
 }
 
-function userAsksImmediateAction(message: string) {
-  return /ทำยังไง|ควรทำไง|ควรทำอย่างไร|ต้องทำอะไร|เริ่มจากอะไร|ทางออก|help/i.test(message);
-}
-
-function hasAcuteHardshipSignals(text: string) {
-  return /รถชน|อุบัติเหตุ|ขาหัก|ไม่มีรายได้|นมผง|ลูกเล็ก|ทารก|หนี้|financial|debt/i.test(text);
-}
-
 function isMoodCheckTrigger(message: string) {
   return /เช็กอารมณ์วันนี้|เช็คอารมณ์วันนี้|mood\s*check|check[\s-]*in/i.test(message);
 }
@@ -168,31 +162,86 @@ function buildLowDisclosureSafeReply(userMessage: string) {
   return "ผมอยู่ตรงนี้กับคุณนะ ถ้ายังไม่พร้อมเล่ายาวๆ พิมพ์สั้นๆ ได้เลย เช่น ตอนนี้เครียด เหนื่อย หรือสับสน เดี๋ยวผมช่วยค่อยๆ ต่อบทสนทนาให้";
 }
 
-function isRepetitiveSupportReply(candidate: string, recentMessages: Array<{ role: string; content_text: string }>) {
-  const lastAssistant = [...recentMessages].reverse().find((message) => message.role === "assistant");
-  if (!lastAssistant) {
-    return false;
+function buildLlmOutageReplyText(locale: string | null | undefined) {
+  if ((locale ?? "").toLowerCase().startsWith("en")) {
+    return "The system is temporarily unavailable. Please try again in 1-2 minutes.";
   }
-
-  const normalize = (value: string) => value.toLowerCase().replace(/\s+/g, " ").trim();
-  const current = normalize(candidate);
-  const previous = normalize(lastAssistant.content_text);
-
-  if (current === previous) {
-    return true;
-  }
-
-  return (
-    current.includes("ตอนนี้อยากให้เราเริ่มแบบไหนดี") &&
-    previous.includes("ตอนนี้อยากให้เราเริ่มแบบไหนดี")
-  );
+  return "ตอนนี้ระบบขัดข้องชั่วคราว ลองใหม่อีกครั้งใน 1-2 นาทีได้เลยครับ";
 }
 
-function hardshipImmediatePlanReply() {
-  return (
-    "ได้เลย เราโฟกัสแบบทำได้ตอนนี้ทันทีนะ ขั้นแรกโทร 1300 เพื่อขอประสานความช่วยเหลือฉุกเฉินเรื่องของจำเป็นสำหรับเด็กเล็ก ขั้นถัดไปโทรโรงพยาบาลที่รักษาเพื่อขอส่งต่อหน่วยสังคมสงเคราะห์ และขั้นสุดท้ายให้ผมช่วยร่างข้อความสั้นๆ ส่งหาคนใกล้ตัวเพื่อขอช่วยค่านมรอบนี้ก่อน\n\n" +
-    "คุณไม่ได้ล้มเหลวเลยนะ ในสถานการณ์หนักขนาดนี้คุณยังพยายามเพื่อลูกเต็มที่มากแล้ว ตอนนี้อยากให้ผมเริ่มจากร่างข้อความขอความช่วยเหลือให้เลยไหม"
-  );
+async function handleLlmPipelineFailure(params: {
+  error: GrokPipelineError;
+  userId: string;
+  sessionId?: string;
+  locale?: string;
+  riskLevel?: "low" | "medium" | "high" | "imminent";
+  channel: "line_oa" | "web_widget" | "system";
+}) {
+  const replyText = buildLlmOutageReplyText(params.locale);
+
+  logger.error("LLM pipeline failed while handling user turn", {
+    userId: params.userId,
+    sessionId: params.sessionId ?? null,
+    stage: params.error.stage,
+    reason: params.error.reason,
+    details: params.error.details ?? null,
+    rawPreview: params.error.rawPreview ?? null
+  });
+
+  if (params.sessionId) {
+    try {
+      await saveMessage({
+        userId: params.userId,
+        sessionId: params.sessionId,
+        role: "assistant",
+        contentType: "text",
+        contentText: replyText,
+        safetyLabel: params.riskLevel
+      });
+    } catch (error) {
+      logger.warn("Failed to persist LLM outage response message", {
+        userId: params.userId,
+        sessionId: params.sessionId,
+        error: error instanceof Error ? error.message : "unknown_error"
+      });
+    }
+  }
+
+  try {
+    await writeAudit({
+      actorType: "system",
+      action: "llm_pipeline_failed",
+      entityType: params.sessionId ? "session" : "user",
+      entityId: params.sessionId ?? params.userId,
+      metadata: {
+        stage: params.error.stage,
+        reason: params.error.reason
+      }
+    });
+  } catch (error) {
+    logger.warn("Failed to write llm_pipeline_failed audit", {
+      userId: params.userId,
+      sessionId: params.sessionId ?? null,
+      error: error instanceof Error ? error.message : "unknown_error"
+    });
+  }
+
+  await safeTrackProductEvent({
+    userId: params.userId,
+    sessionId: params.sessionId,
+    channel: params.channel,
+    eventName: "llm_pipeline_failed",
+    properties: {
+      stage: params.error.stage,
+      reason: params.error.reason
+    }
+  });
+
+  return {
+    shouldReply: true,
+    handled: true,
+    replyMessages: [buildMainMenuQuickReply(replyText)]
+  };
 }
 
 async function enqueueFollowup(followupId: string, delayHours: number) {
@@ -334,13 +383,27 @@ export async function processLineEvent(
 
   const recentSummaries = await listRecentSessionSummaries(user.id, 5);
 
-  const topicDecision = await resolveTopicBoundary({
-    message: userText,
-    actionHint,
-    activeSession,
-    recentSummaries,
-    llmResolver: resolveTopicWithClaude
-  });
+  let topicDecision: TopicDecision;
+  try {
+    topicDecision = await resolveTopicBoundary({
+      message: userText,
+      actionHint,
+      activeSession,
+      recentSummaries,
+      llmResolver: resolveTopicWithGrok
+    });
+  } catch (error) {
+    if (error instanceof GrokPipelineError) {
+      return handleLlmPipelineFailure({
+        error,
+        userId: user.id,
+        sessionId: activeSession?.id,
+        locale: user.language,
+        channel
+      });
+    }
+    throw error;
+  }
 
   if (topicDecision.needsUserConfirmation) {
     const confirmation = buildTopicConfirmationMessage(
@@ -488,36 +551,43 @@ export async function processLineEvent(
   const recentMessages = await listRecentMessages(targetSession.id, 12);
   const userMemories = await listUserMemories(user.id, 8);
 
-  const plan = await buildResponsePlanWithClaude({
-    message: userText,
-    locale: user.language,
-    riskLevel: precheck.riskLevel,
-    topicLabel: targetSession.topic_label,
-    recentMessages: recentMessages.map((message) => ({
-      role: message.role,
-      text: message.content_text
-    })),
-    userMemories: userMemories.map((memory) => ({
-      type: memory.memory_type,
-      content: memory.content
-    })),
-    productBoundary: {
-      crisisPrimaryLabel: env.CRISIS_PRIMARY_LABEL,
-      crisisPhone: env.CRISIS_PRIMARY_PHONE,
-      emergencyNumber: env.CRISIS_EMERGENCY_NUMBER
+  let plan: ResponsePlan;
+  try {
+    plan = await buildResponsePlanWithGrok({
+      message: userText,
+      locale: user.language,
+      riskLevel: precheck.riskLevel,
+      topicLabel: targetSession.topic_label,
+      recentMessages: recentMessages.map((message) => ({
+        role: message.role,
+        text: message.content_text
+      })),
+      userMemories: userMemories.map((memory) => ({
+        type: memory.memory_type,
+        content: memory.content
+      })),
+      productBoundary: {
+        crisisPrimaryLabel: env.CRISIS_PRIMARY_LABEL,
+        crisisPhone: env.CRISIS_PRIMARY_PHONE,
+        emergencyNumber: env.CRISIS_EMERGENCY_NUMBER
+      }
+    });
+  } catch (error) {
+    if (error instanceof GrokPipelineError) {
+      return handleLlmPipelineFailure({
+        error,
+        userId: user.id,
+        sessionId: targetSession.id,
+        locale: user.language,
+        riskLevel: precheck.riskLevel,
+        channel
+      });
     }
-  });
+    throw error;
+  }
 
   const postcheck = runSafetyPostcheck(plan, precheck.riskLevel);
   let outgoingText = postcheck.plan.messageDraft;
-  const contextCorpus = [userText, ...recentMessages.map((message) => message.content_text)].join(" ");
-  if (
-    userAsksImmediateAction(userText) &&
-    hasAcuteHardshipSignals(contextCorpus) &&
-    isRepetitiveSupportReply(outgoingText, recentMessages)
-  ) {
-    outgoingText = hardshipImmediatePlanReply();
-  }
   if (isLowDisclosureMessage(userText) && hasPrematureValidationOpener(outgoingText)) {
     outgoingText = buildLowDisclosureSafeReply(userText);
   }
@@ -647,13 +717,28 @@ export async function runSessionMaintenanceJob(params: {
     return;
   }
 
-  const summary = await summarizeSessionWithClaude({
-    topicLabel: params.topicLabel,
-    recentMessages: messages.map((message) => ({
-      role: message.role,
-      text: message.content_text
-    }))
-  });
+  let summary: Awaited<ReturnType<typeof summarizeSessionWithGrok>>;
+  try {
+    summary = await summarizeSessionWithGrok({
+      topicLabel: params.topicLabel,
+      recentMessages: messages.map((message) => ({
+        role: message.role,
+        text: message.content_text
+      }))
+    });
+  } catch (error) {
+    if (error instanceof GrokPipelineError) {
+      logger.error("LLM pipeline failed during session maintenance", {
+        userId: params.userId,
+        sessionId: params.sessionId,
+        stage: error.stage,
+        reason: error.reason,
+        details: error.details ?? null,
+        rawPreview: error.rawPreview ?? null
+      });
+    }
+    throw error;
+  }
 
   const summaryText = summary.summaryText;
   await saveSessionSummary({

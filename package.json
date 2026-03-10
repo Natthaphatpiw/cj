@@ -9,14 +9,15 @@
     "lint": "next lint"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.57.0",
+    "@ai-sdk/xai": "^3.0.67",
     "@supabase/supabase-js": "^2.58.0",
     "@upstash/qstash": "^2.8.2",
     "@upstash/redis": "^1.35.6",
+    "ai": "^6.0.116",
     "next": "^15.5.6",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
-    "zod": "^4.1.11"
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "@types/node": "^24.7.2",

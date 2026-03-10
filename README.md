@@ -1,4 +1,4 @@
-# LINE OA Mental Health SaaS (Next.js + Supabase + Upstash + Claude)
+# LINE OA Mental Health SaaS (Next.js + Supabase + Upstash + Grok)
 
 Production baseline for a Thai-first mental-health support bot on LINE OA with:
 
@@ -22,7 +22,7 @@ Use free tiers where possible:
 7. Vercel Hobby or Cloudflare for hosting
 8. Optional free tools: Sentry, PostHog, Cloudflare Turnstile
 
-Anthropic Claude API is required and paid.
+xAI Grok API is required and paid.
 ## Local setup
 
 1. Install dependencies
