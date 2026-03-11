@@ -21,11 +21,11 @@ const modulePatterns: Array<{ key: StructuredModuleKey; patterns: RegExp[] }> = 
   },
   {
     key: "thought_reframing",
-    patterns: [/reframing/i, /ปรับมุมมอง/i, /ความคิดวน/i, /คิดลบ/i, /overthink/i]
+    patterns: [/reframing/i, /ปรับมุมมอง/i, /รีเฟรม/i, /จัดความคิด/i]
   },
   {
     key: "sleep_stress_checkin",
-    patterns: [/sleep\s*check/i, /stress\s*check/i, /เช็กการนอน/i, /เช็กความเครียด/i, /นอนไม่หลับ/i]
+    patterns: [/sleep\s*check/i, /stress\s*check/i, /เช็กการนอน/i, /เช็กความเครียด/i]
   },
   {
     key: "mini_journaling",
@@ -45,6 +45,11 @@ function scoreModuleIntent(text: string, key: StructuredModuleKey) {
 export function detectStructuredModuleIntent(message: string): StructuredModuleMatch | null {
   const normalized = message.trim();
   if (!normalized) {
+    return null;
+  }
+
+  const looksLikeLongDisclosure = normalized.length > 120;
+  if (looksLikeLongDisclosure) {
     return null;
   }
 
