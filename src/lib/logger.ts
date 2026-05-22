@@ -44,3 +44,22 @@ export const logger = {
   warn: (message: string, meta?: Record<string, unknown>) => emit("warn", message, meta),
   error: (message: string, meta?: Record<string, unknown>) => emit("error", message, meta)
 };
+
+export function describeError(error: unknown): string {
+  if (!(error instanceof Error)) {
+    return typeof error === "string" ? error : JSON.stringify(error);
+  }
+
+  const cause = (error as { cause?: unknown }).cause;
+  if (!cause) {
+    return `${error.name}: ${error.message}`;
+  }
+
+  if (cause instanceof Error) {
+    const code = (cause as { code?: string }).code;
+    const causeStr = `${cause.name}: ${cause.message}${code ? ` [${code}]` : ""}`;
+    return `${error.name}: ${error.message} (cause: ${causeStr})`;
+  }
+
+  return `${error.name}: ${error.message} (cause: ${String(cause)})`;
+}

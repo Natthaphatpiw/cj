@@ -7,7 +7,7 @@ import { recordWebhookEvent } from "@/lib/data/repositories";
 import { replyMessage, tryDisplayLoadingAnimation } from "@/lib/line/client";
 import { verifyLineSignature } from "@/lib/line/signature";
 import type { LineWebhookEvent, LineWebhookPayload } from "@/lib/line/types";
-import { logger } from "@/lib/logger";
+import { describeError, logger } from "@/lib/logger";
 import { safeJsonParse } from "@/lib/utils/json";
 
 export const runtime = "nodejs";
@@ -47,12 +47,19 @@ export async function POST(request: Request) {
         continue;
       }
 
-      await recordWebhookEvent({
-        webhookEventId: eventId,
-        lineUserId: event.source.userId ?? null,
-        payload: event as unknown as Record<string, unknown>,
-        isRedelivery: Boolean(event.deliveryContext?.isRedelivery)
-      });
+      try {
+        await recordWebhookEvent({
+          webhookEventId: eventId,
+          lineUserId: event.source.userId ?? null,
+          payload: event as unknown as Record<string, unknown>,
+          isRedelivery: Boolean(event.deliveryContext?.isRedelivery)
+        });
+      } catch (auditError) {
+        logger.warn("Failed to persist webhook_events audit row", {
+          eventId,
+          error: describeError(auditError)
+        });
+      }
 
       if (lineUserId) {
         const rate = await checkAndConsumeRateLimit(lineUserId);
@@ -98,7 +105,7 @@ export async function POST(request: Request) {
     } catch (error) {
       logger.error("Webhook event processing failed", {
         eventId,
-        error: error instanceof Error ? error.message : "unknown_error"
+        error: describeError(error)
       });
 
       if (event.replyToken) {
@@ -112,7 +119,7 @@ export async function POST(request: Request) {
         } catch (replyError) {
           logger.error("Failed to send fallback LINE reply", {
             eventId,
-            error: replyError instanceof Error ? replyError.message : "unknown_error"
+            error: describeError(replyError)
           });
         }
       }
